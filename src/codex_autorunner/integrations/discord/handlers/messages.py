@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from ....core.logging_utils import log_event
+from ....core.state import now_iso
 from ..constants import MAX_COALESCE_BUFFER_MESSAGES, MAX_COALESCE_DELAY_SECONDS
 from ..trigger_mode import should_respond, strip_bot_mention
 
@@ -152,12 +153,96 @@ async def _coalesce_timer(
         message_count=len(buffer.texts),
     )
 
-    # The actual turn execution will be wired in when execution commands are connected
-    # For now, log the intent
+    await _dispatch_coalesced_turn(service, buffer.topic_key, combined_text)
+
+
+async def _dispatch_coalesced_turn(
+    service: "DiscordBotService",
+    topic_key: str,
+    combined_text: str,
+) -> None:
+    """Resolve workspace binding, ensure topic record, and spawn a turn."""
+    from ..helpers import split_topic_key
+    from ..state import DiscordTopicRecord
+
+    # Parse topic key back to Discord IDs
+    try:
+        guild_id, channel_id, thread_id = split_topic_key(topic_key)
+    except ValueError:
+        log_event(
+            logger,
+            logging.WARNING,
+            "discord.message.invalid_topic_key",
+            topic_key=topic_key,
+        )
+        return
+
+    # Check if a turn is already active
+    if service._is_turn_active(topic_key):
+        log_event(
+            logger,
+            logging.DEBUG,
+            "discord.message.turn_already_active",
+            topic_key=topic_key,
+        )
+        return
+
+    # Resolve workspace binding
+    channel_key = f"{guild_id}:{channel_id}"
+    binding = await service._store.get_channel_binding(channel_key)
+
+    # Get or create topic record
+    record = await service._store.get_topic(topic_key)
+    if record is None:
+        if binding is None:
+            log_event(
+                logger,
+                logging.DEBUG,
+                "discord.message.no_binding_for_dispatch",
+                topic_key=topic_key,
+            )
+            return
+        record = DiscordTopicRecord(
+            topic_key=topic_key,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            workspace_path=binding,
+            approval_mode=service._config.defaults.approval_mode,
+            created_at=now_iso(),
+            updated_at=now_iso(),
+        )
+        await service._store.save_topic(topic_key, record)
+    elif not record.workspace_path and binding:
+        record.workspace_path = binding
+        record.updated_at = now_iso()
+        await service._store.save_topic(topic_key, record)
+
+    if not record.workspace_path:
+        log_event(
+            logger,
+            logging.DEBUG,
+            "discord.message.no_workspace",
+            topic_key=topic_key,
+        )
+        return
+
     log_event(
         logger,
         logging.INFO,
         "discord.message.turn_pending",
-        topic_key=buffer.topic_key,
+        topic_key=topic_key,
         prompt_preview=combined_text[:80],
+    )
+
+    # Spawn the turn as a background task
+    service._spawn_task(
+        service._execute_turn(
+            topic_key,
+            combined_text,
+            channel_id=channel_id,
+            thread_id=thread_id,
+            reply_to=None,
+            record=record,
+        )
     )

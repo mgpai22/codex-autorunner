@@ -214,6 +214,16 @@ class DiscordBotService(
         self._outbox_lock: Optional[asyncio.Lock] = None
         self._spawned_tasks: set[asyncio.Task[Any]] = set()
 
+        # Turn progress tracking (mirrors Telegram pattern)
+        from .progress_stream import TurnProgressTracker as _TPT  # noqa: F811
+
+        self._turn_progress_trackers: dict[TurnKey, _TPT] = {}
+        self._turn_progress_rendered: dict[TurnKey, str] = {}
+        self._turn_progress_updated_at: dict[TurnKey, float] = {}
+        self._turn_progress_tasks: dict[TurnKey, asyncio.Task[None]] = {}
+        self._turn_progress_heartbeat_tasks: dict[TurnKey, asyncio.Task[None]] = {}
+        self._turn_progress_locks: dict[TurnKey, asyncio.Lock] = {}
+
         # Background task holders
         self._outbox_task: Optional[asyncio.Task[None]] = None
         self._cache_cleanup_task: Optional[asyncio.Task[None]] = None
