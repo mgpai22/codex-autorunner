@@ -113,6 +113,7 @@ app = typer.Typer(add_completion=False)
 hub_app = typer.Typer(add_completion=False)
 dispatch_app = typer.Typer(add_completion=False)
 telegram_app = typer.Typer(add_completion=False)
+discord_app = typer.Typer(add_completion=False)
 templates_app = typer.Typer(add_completion=False)
 repos_app = typer.Typer(add_completion=False)
 worktree_app = typer.Typer(add_completion=False)
@@ -471,6 +472,7 @@ app.add_typer(hub_app, name="hub")
 hub_app.add_typer(dispatch_app, name="dispatch")
 hub_app.add_typer(worktree_app, name="worktree")
 app.add_typer(telegram_app, name="telegram")
+app.add_typer(discord_app, name="discord")
 app.add_typer(templates_app, name="templates")
 templates_app.add_typer(repos_app, name="repos")
 app.add_typer(flow_app, name="flow")
@@ -1988,6 +1990,144 @@ def telegram_state_check(
         store._connection_sync()  # type: ignore[attr-defined]
     except Exception as exc:  # pragma: no cover - defensive runtime check
         _raise_exit(f"Telegram state check failed: {exc}", cause=exc)
+
+
+# ---------------------------------------------------------------------------
+# Discord CLI commands
+# ---------------------------------------------------------------------------
+
+
+@discord_app.command("start")
+def discord_start(
+    path: Optional[Path] = typer.Option(None, "--path", help="Repo or hub root path"),
+):
+    """Start the Discord bot (gateway)."""
+    _require_optional_feature(
+        feature="discord",
+        deps=[("discord", "discord.py")],
+        extra="discord",
+    )
+
+    from ...integrations.discord.config import DiscordBotConfig, DiscordBotConfigError
+    from ...integrations.discord.service import DiscordBotService
+
+    try:
+        config = load_hub_config(path or Path.cwd())
+    except ConfigError as exc:
+        _raise_exit(str(exc), cause=exc)
+    discord_cfg = DiscordBotConfig.from_raw(
+        config.raw.get("discord_bot") if isinstance(config.raw, dict) else None,
+        root=config.root,
+        agent_binaries=getattr(config, "agents", None)
+        and {name: agent.binary for name, agent in config.agents.items()},
+    )
+    if not discord_cfg.enabled:
+        _raise_exit("discord_bot is disabled; set discord_bot.enabled: true")
+    try:
+        discord_cfg.validate()
+    except DiscordBotConfigError as exc:
+        _raise_exit(str(exc), cause=exc)
+    logger = setup_rotating_logger("codex-autorunner-discord", config.log)
+    env_overrides = collect_env_overrides(env=os.environ, include_telegram=False)
+    if env_overrides:
+        logger.info("Environment overrides active: %s", ", ".join(env_overrides))
+    log_event(
+        logger,
+        logging.INFO,
+        "discord.bot.starting",
+        root=str(config.root),
+        mode="hub",
+    )
+
+    async def _run() -> None:
+        service = DiscordBotService(
+            discord_cfg,
+            logger=logger,
+            hub_root=config.root,
+            manifest_path=config.manifest_path,
+            app_server_auto_restart=config.app_server.auto_restart,
+        )
+        await service.run_gateway()
+
+    from ...integrations.discord.config import DiscordBotLockError
+
+    try:
+        asyncio.run(_run())
+    except DiscordBotLockError as exc:
+        _raise_exit(str(exc), cause=exc)
+
+
+@discord_app.command("health")
+def discord_health(
+    path: Optional[Path] = typer.Option(None, "--path", help="Repo or hub root path"),
+):
+    """Check Discord API connectivity for the configured bot."""
+    _require_optional_feature(
+        feature="discord",
+        deps=[("discord", "discord.py")],
+        extra="discord",
+    )
+
+    from ...integrations.discord.config import DiscordBotConfig
+    from ...integrations.discord.doctor import format_health_results, run_health_check
+
+    try:
+        config = load_hub_config(path or Path.cwd())
+    except ConfigError as exc:
+        _raise_exit(str(exc), cause=exc)
+    discord_cfg = DiscordBotConfig.from_raw(
+        config.raw.get("discord_bot") if isinstance(config.raw, dict) else None,
+        root=config.root,
+        agent_binaries=getattr(config, "agents", None)
+        and {name: agent.binary for name, agent in config.agents.items()},
+    )
+    if not discord_cfg.enabled:
+        _raise_exit("discord_bot is disabled; set discord_bot.enabled: true")
+    bot_token = discord_cfg.bot_token
+    if not bot_token:
+        _raise_exit(f"missing bot token env '{discord_cfg.bot_token_env}'")
+
+    async def _run() -> None:
+        results = await run_health_check(
+            token=bot_token,
+            state_path=discord_cfg.state_file,
+            skip_gateway=False,
+        )
+        text = format_health_results(results)
+        typer.echo(text)
+
+    asyncio.run(_run())
+
+
+@discord_app.command("state-check")
+def discord_state_check(
+    path: Optional[Path] = typer.Option(None, "--path", help="Repo or hub root path"),
+):
+    """Open the Discord state DB and ensure schema migrations apply."""
+    from ...integrations.discord.config import DiscordBotConfig
+    from ...integrations.discord.state import DiscordStateStore
+
+    try:
+        config = load_hub_config(path or Path.cwd())
+    except ConfigError as exc:
+        _raise_exit(str(exc), cause=exc)
+    discord_cfg = DiscordBotConfig.from_raw(
+        config.raw.get("discord_bot") if isinstance(config.raw, dict) else None,
+        root=config.root,
+        agent_binaries=getattr(config, "agents", None)
+        and {name: agent.binary for name, agent in config.agents.items()},
+    )
+    if not discord_cfg.enabled:
+        _raise_exit("discord_bot is disabled; set discord_bot.enabled: true")
+
+    try:
+        store = DiscordStateStore(
+            discord_cfg.state_file,
+            default_approval_mode=discord_cfg.defaults.approval_mode,
+        )
+        store._connection_sync()  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover - defensive runtime check
+        _raise_exit(f"Discord state check failed: {exc}", cause=exc)
 
 
 def _normalize_flow_run_id(run_id: Optional[str]) -> Optional[str]:

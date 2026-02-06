@@ -2,6 +2,7 @@
   "findings": [
     "python:class:src/codex_autorunner/core/app_server_logging.py:72:AppServerEventFormatter",
     "python:class:src/codex_autorunner/core/supervisor_protocol.py:7:AppServerSupervisorProtocol",
+    "python:class:src/codex_autorunner/integrations/discord/outbox.py:20:DiscordOutboxManager",
     "python:class:src/codex_autorunner/surfaces/web/schemas.py:192:GithubIssueRequest",
     "python:class:src/codex_autorunner/surfaces/web/schemas.py:196:GithubContextRequest",
     "python:class:src/codex_autorunner/surfaces/web/schemas.py:200:GithubPrSyncRequest",
@@ -16,10 +17,18 @@
     "python:function:src/codex_autorunner/core/state_roots.py:55:resolve_repo_state_root",
     "python:function:src/codex_autorunner/integrations/agents/runner.py:21:run_turn_with_backend",
     "python:function:src/codex_autorunner/integrations/agents/runner.py:72:stream_turn_events",
+    "python:function:src/codex_autorunner/integrations/discord/dispatch.py:45:dispatch_message",
+    "python:function:src/codex_autorunner/integrations/discord/helpers.py:54:split_topic_key",
+    "python:function:src/codex_autorunner/integrations/discord/overflow.py:62:needs_overflow",
+    "python:function:src/codex_autorunner/integrations/discord/overflow.py:67:overflow_as_embed",
+    "python:function:src/codex_autorunner/integrations/discord/overflow.py:79:overflow_as_file",
+    "python:function:src/codex_autorunner/integrations/discord/progress_stream.py:158:render_progress_embed",
+    "python:function:src/codex_autorunner/integrations/discord/rendering.py:100:build_warning_embed",
+    "python:function:src/codex_autorunner/integrations/discord/rendering.py:113:build_progress_embed",
+    "python:function:src/codex_autorunner/integrations/discord/rendering.py:180:markdown_to_discord",
     "python:function:src/codex_autorunner/integrations/github/service.py:257:parse_pr_input",
     "python:function:src/codex_autorunner/surfaces/web/routes/shared.py:138:log_stream",
     "python:function:src/codex_autorunner/surfaces/web/routes/shared.py:171:jsonl_event_stream",
-    "python:function:src/codex_autorunner/surfaces/web/routes/shared.py:217:state_stream",
-    "python:function:src/codex_autorunner/tickets/outbox.py:17:set_lifecycle_emitter"
+    "python:function:src/codex_autorunner/surfaces/web/routes/shared.py:217:state_stream"
   ]
 }
