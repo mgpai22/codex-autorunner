@@ -303,6 +303,31 @@ telegram_bot:
   # Default chat for workspaces without bound topics (Telegram chat id)
   default_notification_chat_id: null
 
+discord_bot:
+  # Discord bot integration (gateway-based via discord.py).
+  enabled: true
+  bot_token_env: CAR_DISCORD_BOT_TOKEN
+  allowed_guild_ids:
+    - 1469292027509342434
+  # 'mentions' = only respond to @bot mentions (safe for shared servers)
+  # 'all' = respond to all messages in bound channels
+  trigger_mode: mentions
+  defaults:
+    approval_mode: safe
+    approval_policy: on-request
+    sandbox_policy: dangerFullAccess
+  concurrency:
+    max_parallel_turns: 4
+    per_topic_queue: true
+  shell:
+    enabled: true
+    timeout_ms: 120000
+    max_output_chars: 3800
+  progress_stream:
+    enabled: true
+    min_edit_interval_seconds: 1.5
+  state_file: .codex-autorunner/discord_state.sqlite3
+
 hub:
   # Hub repo discovery root (relative to config file location).
   # Example: . → /repo/root/ (where codex-autorunner.yml is located)
