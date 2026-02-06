@@ -22,10 +22,26 @@ async def dispatch_component_interaction(
     if not custom_id:
         return
 
-    parts = custom_id.split(":", 2)
+    parts = custom_id.split(":")
     kind = parts[0] if parts else ""
 
     try:
+        if kind == "task":
+            # Format: task:{action}:{guild_id}:{thread_id}
+            if len(parts) >= 4:
+                action = parts[1]
+                guild_raw = parts[2]
+                thread_raw = parts[3]
+                try:
+                    guild_id = int(guild_raw)
+                    thread_id = int(thread_raw)
+                except (TypeError, ValueError):
+                    return
+                await service._handle_task_button(
+                    interaction, action, guild_id, thread_id
+                )
+            return
+
         if kind == "approval":
             # Format: approval:{request_id}:{decision}
             if len(parts) >= 3:
@@ -48,7 +64,7 @@ async def dispatch_component_interaction(
 
         if (
             kind == "selection"
-            or custom_id.endswith(":select")
+            or ":select:" in custom_id
             or ":page:" in custom_id
         ):
             await _handle_selection_interaction(service, interaction, custom_id)

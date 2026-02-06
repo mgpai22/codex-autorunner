@@ -35,13 +35,18 @@ from .constants import (
 
 # Handler mixins
 from .handlers.approvals import DiscordApprovalHandlers
+from .handlers.agent_bus import DiscordAgentBusMixin
 from .handlers.commands.execution import ExecutionCommands
 from .handlers.commands.formatting import FormattingHelpers
+from .handlers.commands.scaffold import ScaffoldCommands
 from .handlers.commands.shared import SharedHelpers
 from .handlers.commands.workspace import WorkspaceCommands
 from .handlers.commands_runtime import DiscordCommandHandlers
+from .handlers.dashboard import DiscordDashboardMixin
 from .handlers.questions import DiscordQuestionHandlers
+from .handlers.rbac import DiscordRBACMixin
 from .handlers.selections import DiscordSelectionHandlers
+from .handlers.tasks import DiscordTasksMixin
 from .helpers import (
     ModelOption,
     _discord_lock_path,
@@ -111,6 +116,11 @@ class DiscordBotService(
     ExecutionCommands,
     WorkspaceCommands,
     FormattingHelpers,
+    ScaffoldCommands,
+    DiscordRBACMixin,
+    DiscordAgentBusMixin,
+    DiscordDashboardMixin,
+    DiscordTasksMixin,
 ):
     """Discord bot service – gateway-based counterpart of TelegramBotService.
 
@@ -126,6 +136,11 @@ class DiscordBotService(
     - ExecutionCommands: /run, /stop, /new command implementations
     - WorkspaceCommands: /bind, /status command implementations
     - FormattingHelpers: consistent embed formatting
+    - ScaffoldCommands: /setup scaffolding for swarm control surface
+    - DiscordRBACMixin: role-based access control helpers
+    - DiscordAgentBusMixin: lifecycle/coordination event bus posting
+    - DiscordDashboardMixin: pinned dashboard embed maintenance
+    - DiscordTasksMixin: forum-backed task cards and triage commands
     """
 
     def __init__(
@@ -350,6 +365,209 @@ class DiscordBotService(
         return lock
 
     # ------------------------------------------------------------------
+    # Presence
+    # ------------------------------------------------------------------
+
+    async def _update_presence(self) -> None:
+        if discord is None:
+            return
+        count = len(self._turn_contexts)
+        label = f"{count} tasks" if count != 1 else "1 task"
+        activity = discord.Activity(type=discord.ActivityType.watching, name=label)
+        try:
+            await self._bot.bot.change_presence(activity=activity)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "discord.presence.change_failed",
+                active_turns=count,
+                exc=exc,
+            )
+
+    # ------------------------------------------------------------------
+    # Reconcile / restore (on_ready)
+    # ------------------------------------------------------------------
+
+    async def _reconcile_on_ready(self) -> None:
+        if discord is None:
+            return
+
+        for guild_id in self._config.allowed_guild_ids:
+            try:
+                await self._reconcile_guild(int(guild_id))
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "discord.reconcile.guild_failed",
+                    guild_id=guild_id,
+                    exc=exc,
+                )
+
+    async def _reconcile_guild(self, guild_id: int) -> None:
+        if discord is None:
+            return
+
+        await self._reregister_task_card_views(guild_id)
+
+        try:
+            rows = await self._store.list_scaffolded_channels(guild_id)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.WARNING,
+                "discord.reconcile.scaffold_list_failed",
+                guild_id=guild_id,
+                exc=exc,
+            )
+            rows = []
+
+        for _gid, workspace_id, channel_type, channel_id, created_at in rows:
+            channel = None
+            try:
+                channel = await self._bot.fetch_channel(channel_id)
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.INFO,
+                    "discord.reconcile.channel_recreated",
+                    guild_id=guild_id,
+                    workspace_id=workspace_id,
+                    channel_type=channel_type,
+                    channel_id=channel_id,
+                    created_at=created_at,
+                    exc=exc,
+                )
+                continue
+
+            if (
+                channel_type == "tasks"
+                and str(getattr(self._config.scaffold, "tasks_channel_kind", ""))
+                .strip()
+                .lower()
+                == "forum"
+                and isinstance(channel, discord.ForumChannel)
+            ):
+                tags_created: list[dict[str, Any]] = []
+                try:
+                    await self._ensure_forum_tags(
+                        channel,
+                        guild_id=guild_id,
+                        workspace_id=workspace_id,
+                        tags_created=tags_created,
+                    )
+                except Exception as exc:
+                    log_event(
+                        self._logger,
+                        logging.WARNING,
+                        "discord.reconcile.tag_ensure_failed",
+                        guild_id=guild_id,
+                        workspace_id=workspace_id,
+                        forum_channel_id=channel_id,
+                        exc=exc,
+                    )
+                else:
+                    for entry in tags_created:
+                        log_event(
+                            self._logger,
+                            logging.INFO,
+                            "discord.reconcile.tag_recreated",
+                            guild_id=guild_id,
+                            workspace_id=workspace_id,
+                            forum_channel_id=entry.get("forum_channel_id"),
+                            tag_name=entry.get("tag_name"),
+                            tag_id=entry.get("tag_id"),
+                        )
+
+        await self._reconcile_dashboard(guild_id)
+
+    async def _reconcile_dashboard(self, guild_id: int) -> None:
+        record = None
+        try:
+            record = await self._store.get_dashboard(guild_id)
+        except Exception:
+            record = None
+
+        channel_id: Optional[int] = None
+        message_id: Optional[int] = None
+        if isinstance(record, tuple) and len(record) >= 2:
+            channel_id = record[0] if isinstance(record[0], int) else None
+            message_id = record[1] if isinstance(record[1], int) else None
+        elif record is not None:
+            channel_id = getattr(record, "channel_id", None)
+            message_id = getattr(record, "message_id", None)
+
+        if isinstance(channel_id, int) and isinstance(message_id, int):
+            try:
+                msg = await self._bot.fetch_message(channel_id, message_id)
+                if msg is None:
+                    raise RuntimeError("dashboard message missing")
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.INFO,
+                    "discord.reconcile.dashboard_recreated",
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    message_id=message_id,
+                    exc=exc,
+                )
+
+        try:
+            await self._ensure_dashboard(guild_id)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.DEBUG,
+                "discord.dashboard.ensure_failed",
+                guild_id=guild_id,
+                exc=exc,
+            )
+
+    async def _reregister_task_card_views(self, guild_id: int) -> None:
+        if discord is None:
+            return
+
+        try:
+            from .handlers import tasks as _tasks  # type: ignore
+
+            view_cls = getattr(_tasks, "TaskCardView", None)
+        except Exception:
+            view_cls = None
+
+        if view_cls is None:
+            return
+
+        try:
+            tasks = await self._store.list_tasks(guild_id)
+        except Exception:
+            tasks = []
+
+        if not hasattr(self, "_task_views_registered"):
+            self._task_views_registered: set[tuple[int, int]] = set()
+
+        for task in tasks:
+            thread_id = task.get("thread_id") if isinstance(task, dict) else None
+            if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+                continue
+            key = (guild_id, thread_id)
+            if key in self._task_views_registered:
+                continue
+            try:
+                self._bot.bot.add_view(view_cls(guild_id=guild_id, thread_id=thread_id))
+                self._task_views_registered.add(key)
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "discord.task.view_register_failed",
+                    guild_id=guild_id,
+                    thread_id=thread_id,
+                    exc=exc,
+                )
+
+    # ------------------------------------------------------------------
     # Gateway lifecycle
     # ------------------------------------------------------------------
 
@@ -379,6 +597,38 @@ class DiscordBotService(
             )
             # Restore pending approvals from previous session
             await self._restore_pending_approvals()
+            # Reconcile control surface (scaffolded channels/tags, dashboard, task views)
+            try:
+                await self._reconcile_on_ready()
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "discord.reconcile.failed",
+                    exc=exc,
+                )
+
+            # Register lifecycle listener for agent bus (hub lifecycle events)
+            try:
+                await self._register_lifecycle_listener()
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "discord.agent_bus.listener_register_failed",
+                    exc=exc,
+                )
+
+            # Update bot presence based on active turns
+            try:
+                await self._update_presence()
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "discord.presence.update_failed",
+                    exc=exc,
+                )
             # Sync slash commands to all allowed guilds
             for guild_id in self._config.allowed_guild_ids:
                 try:

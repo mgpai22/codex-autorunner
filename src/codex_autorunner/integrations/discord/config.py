@@ -38,7 +38,7 @@ from .constants import (
     TURN_PREVIEW_TTL_SECONDS,
     UPDATE_ID_PERSIST_INTERVAL_SECONDS,
 )
-from .state import APPROVAL_MODE_YOLO, normalize_approval_mode
+from .state import APPROVAL_MODE_SAFE, APPROVAL_MODE_YOLO, normalize_approval_mode
 
 DEFAULT_SAFE_APPROVAL_POLICY = "on-request"
 DEFAULT_YOLO_APPROVAL_POLICY = "never"
@@ -126,6 +126,61 @@ class DiscordBotCacheConfig:
 
 
 @dataclass(frozen=True)
+class DiscordScaffoldConfig:
+    enabled: bool = False
+    auto_bind: bool = True
+    category_prefix: str = ""
+    tasks_channel_kind: str = "forum"
+    tasks_channel_name: str = "tasks"
+    task_forum_tags: tuple[str, ...] = (
+        "queued",
+        "running",
+        "needs-approval",
+        "blocked",
+        "done",
+        "failed",
+        "timeout",
+        "stopped",
+        "p0",
+        "p1",
+        "p2",
+    )
+    activity_channel_name: str = "activity-feed"
+    approval_channel_name: str = "approvals"
+    dashboard_channel_name: str = "dashboard"
+    agent_bus_channel_name: str = "agent-bus"
+    notifications_channel_name: str = "notifications"
+
+
+@dataclass(frozen=True)
+class DiscordRoleTier:
+    name: str
+    role_ids: tuple[int, ...]
+    approval_mode: str = "safe"
+    can_setup: bool = False
+    can_run: bool = False
+    can_stop: bool = False
+    can_bind: bool = False
+    read_only: bool = False
+
+
+@dataclass(frozen=True)
+class DiscordRBACConfig:
+    enabled: bool = False
+    use_default_member_permissions: bool = True
+    tiers: tuple[DiscordRoleTier, ...] = ()
+    default_tier: str = "viewer"
+
+
+@dataclass(frozen=True)
+class DiscordAlertConfig:
+    enabled: bool = True
+    alert_role_id: Optional[int] = None
+    per_task_cooldown_seconds: int = 900
+    global_cooldown_seconds: int = 10
+
+
+@dataclass(frozen=True)
 class DiscordBotProgressStreamConfig:
     enabled: bool
     max_actions: int
@@ -201,6 +256,9 @@ class DiscordBotConfig:
     media: DiscordBotMediaConfig
     shell: DiscordBotShellConfig
     cache: DiscordBotCacheConfig
+    scaffold: DiscordScaffoldConfig
+    rbac: DiscordRBACConfig
+    alerts: DiscordAlertConfig
     progress_stream: DiscordBotProgressStreamConfig
     state_file: Path
     app_server_command_env: str
@@ -219,6 +277,8 @@ class DiscordBotConfig:
     ticket_flow_auto_resume: bool
     pause_dispatch_notifications: PauseDispatchNotifications
     default_notification_channel_id: Optional[int]
+    dashboard_channel_id: Optional[int] = None
+    agent_bus_channel_id: Optional[int] = None
 
     @classmethod
     def from_raw(
@@ -420,6 +480,162 @@ class DiscordBotConfig:
             ),
         )
 
+        # Scaffold
+        scaffold_raw_value = cfg.get("scaffold")
+        scaffold_raw: dict[str, Any] = (
+            scaffold_raw_value if isinstance(scaffold_raw_value, dict) else {}
+        )
+        scaffold_enabled = bool(scaffold_raw.get("enabled", False))
+        scaffold_auto_bind = bool(scaffold_raw.get("auto_bind", True))
+        scaffold_category_prefix = str(scaffold_raw.get("category_prefix", "")).strip()
+
+        scaffold_tasks_channel_kind = str(
+            scaffold_raw.get("tasks_channel_kind", "forum")
+        ).strip()
+        if not scaffold_tasks_channel_kind:
+            scaffold_tasks_channel_kind = "forum"
+
+        scaffold_tasks_channel_name = str(
+            scaffold_raw.get("tasks_channel_name", "tasks")
+        ).strip()
+        if not scaffold_tasks_channel_name:
+            scaffold_tasks_channel_name = "tasks"
+
+        scaffold_task_forum_tags = DiscordScaffoldConfig.task_forum_tags
+        scaffold_task_forum_tags_value = scaffold_raw.get("task_forum_tags")
+        if isinstance(scaffold_task_forum_tags_value, (list, tuple)):
+            tags: list[str] = []
+            for item in scaffold_task_forum_tags_value:
+                tag = str(item).strip()
+                if tag:
+                    tags.append(tag)
+            if tags:
+                scaffold_task_forum_tags = tuple(tags)
+        elif isinstance(scaffold_task_forum_tags_value, str):
+            tags = []
+            for part in scaffold_task_forum_tags_value.split(","):
+                part = part.strip()
+                if part:
+                    tags.append(part)
+            if tags:
+                scaffold_task_forum_tags = tuple(tags)
+
+        scaffold_activity_channel_name = str(
+            scaffold_raw.get("activity_channel_name", "activity-feed")
+        ).strip()
+        if not scaffold_activity_channel_name:
+            scaffold_activity_channel_name = "activity-feed"
+
+        scaffold_approval_channel_name = str(
+            scaffold_raw.get("approval_channel_name", "approvals")
+        ).strip()
+        if not scaffold_approval_channel_name:
+            scaffold_approval_channel_name = "approvals"
+
+        scaffold_dashboard_channel_name = str(
+            scaffold_raw.get("dashboard_channel_name", "dashboard")
+        ).strip()
+        if not scaffold_dashboard_channel_name:
+            scaffold_dashboard_channel_name = "dashboard"
+
+        scaffold_agent_bus_channel_name = str(
+            scaffold_raw.get("agent_bus_channel_name", "agent-bus")
+        ).strip()
+        if not scaffold_agent_bus_channel_name:
+            scaffold_agent_bus_channel_name = "agent-bus"
+
+        scaffold_notifications_channel_name = str(
+            scaffold_raw.get("notifications_channel_name", "notifications")
+        ).strip()
+        if not scaffold_notifications_channel_name:
+            scaffold_notifications_channel_name = "notifications"
+
+        scaffold = DiscordScaffoldConfig(
+            enabled=scaffold_enabled,
+            auto_bind=scaffold_auto_bind,
+            category_prefix=scaffold_category_prefix,
+            tasks_channel_kind=scaffold_tasks_channel_kind,
+            tasks_channel_name=scaffold_tasks_channel_name,
+            task_forum_tags=scaffold_task_forum_tags,
+            activity_channel_name=scaffold_activity_channel_name,
+            approval_channel_name=scaffold_approval_channel_name,
+            dashboard_channel_name=scaffold_dashboard_channel_name,
+            agent_bus_channel_name=scaffold_agent_bus_channel_name,
+            notifications_channel_name=scaffold_notifications_channel_name,
+        )
+
+        # RBAC
+        rbac_raw_value = cfg.get("rbac")
+        rbac_raw: dict[str, Any] = (
+            rbac_raw_value if isinstance(rbac_raw_value, dict) else {}
+        )
+        rbac_enabled = bool(rbac_raw.get("enabled", False))
+        rbac_use_default_member_permissions = bool(
+            rbac_raw.get("use_default_member_permissions", True)
+        )
+        rbac_tiers_value = rbac_raw.get("tiers")
+        rbac_tiers: list[DiscordRoleTier] = []
+        if isinstance(rbac_tiers_value, (list, tuple)):
+            for item in rbac_tiers_value:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                if not name:
+                    continue
+                role_ids = tuple(_parse_int_list(item.get("role_ids")))
+                approval_mode = normalize_approval_mode(
+                    item.get("approval_mode"), default=APPROVAL_MODE_SAFE
+                )
+                rbac_tiers.append(
+                    DiscordRoleTier(
+                        name=name,
+                        role_ids=role_ids,
+                        approval_mode=approval_mode,
+                        can_setup=bool(item.get("can_setup", False)),
+                        can_run=bool(item.get("can_run", False)),
+                        can_stop=bool(item.get("can_stop", False)),
+                        can_bind=bool(item.get("can_bind", False)),
+                        read_only=bool(item.get("read_only", False)),
+                    )
+                )
+        rbac_default_tier = str(rbac_raw.get("default_tier", "viewer")).strip()
+        if not rbac_default_tier:
+            rbac_default_tier = "viewer"
+        rbac = DiscordRBACConfig(
+            enabled=rbac_enabled,
+            use_default_member_permissions=rbac_use_default_member_permissions,
+            tiers=tuple(rbac_tiers),
+            default_tier=rbac_default_tier,
+        )
+
+        # Alerts
+        alerts_raw_value = cfg.get("alerts")
+        alerts_raw: dict[str, Any] = (
+            alerts_raw_value if isinstance(alerts_raw_value, dict) else {}
+        )
+        alerts_enabled = bool(alerts_raw.get("enabled", True))
+        alert_role_id_raw = alerts_raw.get("alert_role_id")
+        alert_role_id: Optional[int] = None
+        if alert_role_id_raw is not None:
+            try:
+                alert_role_id = int(alert_role_id_raw)
+            except (TypeError, ValueError):
+                alert_role_id = None
+        per_task_cooldown_seconds = int(
+            alerts_raw.get("per_task_cooldown_seconds", 900)
+        )
+        if per_task_cooldown_seconds <= 0:
+            per_task_cooldown_seconds = 900
+        global_cooldown_seconds = int(alerts_raw.get("global_cooldown_seconds", 10))
+        if global_cooldown_seconds <= 0:
+            global_cooldown_seconds = 10
+        alerts = DiscordAlertConfig(
+            enabled=alerts_enabled,
+            alert_role_id=alert_role_id,
+            per_task_cooldown_seconds=per_task_cooldown_seconds,
+            global_cooldown_seconds=global_cooldown_seconds,
+        )
+
         # Progress stream
         progress_raw_value = cfg.get("progress_stream")
         progress_raw: dict[str, Any] = (
@@ -516,6 +732,23 @@ class DiscordBotConfig:
                 default_notification_channel_id = int(default_notification_channel_raw)
             except (TypeError, ValueError):
                 default_notification_channel_id = None
+
+        # Dashboard & agent bus channels
+        dashboard_channel_raw = cfg.get("dashboard_channel_id")
+        dashboard_channel_id: Optional[int] = None
+        if dashboard_channel_raw is not None:
+            try:
+                dashboard_channel_id = int(dashboard_channel_raw)
+            except (TypeError, ValueError):
+                dashboard_channel_id = None
+
+        agent_bus_channel_raw = cfg.get("agent_bus_channel_id")
+        agent_bus_channel_id: Optional[int] = None
+        if agent_bus_channel_raw is not None:
+            try:
+                agent_bus_channel_id = int(agent_bus_channel_raw)
+            except (TypeError, ValueError):
+                agent_bus_channel_id = None
 
         # Agent binaries & commands
         agent_binaries = dict(agent_binaries or {})
@@ -628,6 +861,9 @@ class DiscordBotConfig:
             media=media,
             shell=shell,
             cache=cache,
+            scaffold=scaffold,
+            rbac=rbac,
+            alerts=alerts,
             progress_stream=progress_stream,
             state_file=state_file,
             app_server_command_env=app_server_command_env,
@@ -646,6 +882,8 @@ class DiscordBotConfig:
             ticket_flow_auto_resume=ticket_flow_auto_resume,
             pause_dispatch_notifications=pause_dispatch_notifications,
             default_notification_channel_id=default_notification_channel_id,
+            dashboard_channel_id=dashboard_channel_id,
+            agent_bus_channel_id=agent_bus_channel_id,
         )
 
     def validate(self) -> None:

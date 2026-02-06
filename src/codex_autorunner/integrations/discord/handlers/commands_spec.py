@@ -13,11 +13,20 @@ class SlashCommandSpec:
 def build_slash_command_specs() -> dict[str, SlashCommandSpec]:
     """Return the registry of all slash commands."""
     return {
+        "setup": SlashCommandSpec(
+            "setup", "Scaffold swarm control surface channels", allow_during_turn=True
+        ),
         "run": SlashCommandSpec("run", "Run an agent task", allow_during_turn=False),
         "stop": SlashCommandSpec(
             "stop", "Stop the active task", allow_during_turn=True
         ),
         "bind": SlashCommandSpec("bind", "Bind this channel to a workspace"),
+        "workspaces": SlashCommandSpec(
+            "workspaces", "List scaffolded workspaces", allow_during_turn=True
+        ),
+        "tasks": SlashCommandSpec(
+            "tasks", "Task triage and navigation", allow_during_turn=True
+        ),
         "repos": SlashCommandSpec(
             "repos", "List available repositories", allow_during_turn=True
         ),

@@ -13,6 +13,7 @@ DISCORD_SELECT_OPTIONS_LIMIT = 25
 DISCORD_CUSTOM_ID_LIMIT = 100
 DISCORD_THREAD_AUTO_ARCHIVE_MINUTES = 1440
 DISCORD_INTERACTION_TIMEOUT_SECONDS = 3.0
+THREAD_NAME_MAX_LEN = 100
 
 # ---------------------------------------------------------------------------
 # Pagination / list defaults

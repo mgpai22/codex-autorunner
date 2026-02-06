@@ -15,6 +15,13 @@ from .constants import (
 
 logger = logging.getLogger("codex_autorunner.integrations.discord.notifications")
 
+try:
+    import discord
+
+    HAS_DISCORD = True
+except ImportError:
+    HAS_DISCORD = False
+
 
 # ---------------------------------------------------------------------------
 # Lightweight helpers (avoid pulling in telegram helpers)
@@ -212,13 +219,16 @@ class DiscordNotificationHandlers:
             return
 
         # ---- Progress-stream events ----
-        if self._config.progress_stream.enabled:
-            if method in (
-                "item/commandExecution/requestApproval",
-                "item/fileChange/requestApproval",
-            ):
+        if method in (
+            "item/commandExecution/requestApproval",
+            "item/fileChange/requestApproval",
+        ):
+            await self._note_task_needs_approval(params)
+            if self._config.progress_stream.enabled:
                 await self._note_progress_approval(method, params)
-                return
+            return
+
+        if self._config.progress_stream.enabled:
             if method == "turn/completed":
                 await self._note_progress_turn_completed(params)
                 return
@@ -249,6 +259,10 @@ class DiscordNotificationHandlers:
                     title="Flow Paused",
                     description=f"Flow **{flow_name or flow_id}** has been paused.",
                 )
+            await self._post_lifecycle_to_agent_bus(
+                "flow_paused",
+                {"flow_id": flow_id, "flow_name": flow_name},
+            )
             return
 
         if method == "car/lifecycle/flow_completed":
@@ -270,6 +284,10 @@ class DiscordNotificationHandlers:
                     title="Flow Completed",
                     description=f"Flow **{flow_name or flow_id}** has completed.",
                 )
+            await self._post_lifecycle_to_agent_bus(
+                "flow_completed",
+                {"flow_id": flow_id, "flow_name": flow_name},
+            )
             return
 
         if method == "car/lifecycle/flow_failed":
@@ -294,6 +312,10 @@ class DiscordNotificationHandlers:
                     description=f"Flow **{flow_name or flow_id}** failed: {error}",
                     error=True,
                 )
+            await self._post_lifecycle_to_agent_bus(
+                "flow_failed",
+                {"flow_id": flow_id, "flow_name": flow_name, "error": error},
+            )
             return
 
         log_event(
@@ -302,6 +324,169 @@ class DiscordNotificationHandlers:
             "discord.notification.unhandled",
             method=method,
         )
+
+    async def _note_task_needs_approval(self, params: dict[str, Any]) -> None:
+        """When an approval is requested, update the forum task tag to needs-approval."""
+        try:
+            turn_id = _coerce_id(params.get("turnId"))
+            thread_id = _extract_turn_thread_id(params)
+            if not hasattr(self, "_resolve_turn_context"):
+                return
+            ctx = self._resolve_turn_context(turn_id, thread_id=thread_id)  # type: ignore[attr-defined]
+            if ctx is None:
+                return
+            guild_id = getattr(ctx, "guild_id", None)
+            disc_thread_id = getattr(ctx, "thread_id", None)
+            if (
+                not isinstance(guild_id, int)
+                or isinstance(guild_id, bool)
+                or not isinstance(disc_thread_id, int)
+                or isinstance(disc_thread_id, bool)
+            ):
+                return
+            await self._update_task_state(guild_id, disc_thread_id, "needs-approval")
+        except Exception:
+            return
+
+    async def _post_lifecycle_to_agent_bus(self, event_type: str, details: Any) -> None:
+        """Post a lifecycle event into the agent bus channel (best-effort)."""
+        if not hasattr(self, "_post_to_agent_bus"):
+            return
+        try:
+            from .rendering import build_agent_bus_embed
+
+            embed = build_agent_bus_embed("Autorunner", event_type, details)
+            for guild_id in getattr(self._config, "allowed_guild_ids", set()):
+                await self._post_to_agent_bus(int(guild_id), "Autorunner", embed)  # type: ignore[attr-defined]
+        except Exception:
+            return
+
+    async def _post_task_activity(self, guild_id: int, thread_id: int, state: str) -> None:
+        """Post a task state update to the workspace activity-feed channel."""
+        if not HAS_DISCORD:
+            return
+        try:
+            task = await self._store.get_task(guild_id, thread_id)
+        except Exception:
+            task = None
+        if not isinstance(task, dict):
+            return
+
+        workspace_id = task.get("workspace_id")
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+
+        activity_channel_id = None
+        try:
+            activity_channel_id = await self._store.get_scaffolded_channel(
+                guild_id, workspace_id, "activity"
+            )
+        except Exception:
+            activity_channel_id = None
+        if not isinstance(activity_channel_id, int) or isinstance(activity_channel_id, bool):
+            return
+
+        prompt = task.get("initial_prompt") or ""
+        preview = prompt.strip().replace("\n", " ")
+        if preview:
+            preview = preview[:200]
+        else:
+            preview = "(no prompt)"
+
+        created_by_user_id = task.get("created_by_user_id")
+        initiator = f"<@{created_by_user_id}>" if isinstance(created_by_user_id, int) else ""
+        thread_url = f"https://discord.com/channels/{guild_id}/{thread_id}"
+
+        color = None
+        state_key = state.strip().lower() if isinstance(state, str) else ""
+        if state_key in {"failed", "timeout"}:
+            from .constants import EMBED_COLOR_ERROR as _C
+
+            color = _C
+        elif state_key in {"needs-approval", "blocked", "stopped"}:
+            from .constants import EMBED_COLOR_WARNING as _C
+
+            color = _C
+        elif state_key in {"running"}:
+            from .constants import EMBED_COLOR_PROGRESS as _C
+
+            color = _C
+        elif state_key in {"done"}:
+            from .constants import EMBED_COLOR_SUCCESS as _C
+
+            color = _C
+        else:
+            from .constants import EMBED_COLOR_INFO as _C
+
+            color = _C
+
+        from .rendering import build_response_embed
+
+        title = f"Task {state_key or state}"
+        lines = [f"[Task thread]({thread_url}) \u2022 <#{thread_id}>"]
+        if initiator:
+            lines.append(f"Initiator: {initiator}")
+        lines.append(f"State: **{state_key or state}**")
+        lines.append(preview)
+        embed = build_response_embed("\n".join(lines), color=color, title=title)
+
+        msg_id = await self._send_message(activity_channel_id, embed=embed)
+        if msg_id is None:
+            return
+        try:
+            await self._store.update_task_activity(guild_id, thread_id, msg_id)
+        except Exception:
+            pass
+
+    async def _maybe_send_task_alert(self, guild_id: int, thread_id: int, alert_type: str) -> None:
+        """Trigger a role ping for urgent task events (deduped via discord_alerts)."""
+        if not HAS_DISCORD:
+            return
+
+        alerts = getattr(self._config, "alerts", None)
+        if alerts is None or not getattr(alerts, "enabled", False):
+            return
+        alert_role_id = getattr(alerts, "alert_role_id", None)
+        if not isinstance(alert_role_id, int) or not alert_role_id:
+            return
+
+        cooldown = int(getattr(alerts, "per_task_cooldown_seconds", 0) or 0)
+        should_send = False
+        try:
+            should_send = await self._store.should_alert(
+                guild_id, thread_id, alert_type, cooldown_seconds=cooldown
+            )
+        except Exception:
+            should_send = True
+        if not should_send:
+            return
+
+        thread = self._bot.get_channel(thread_id)
+        if thread is None:
+            try:
+                thread = await self._bot.fetch_channel(thread_id)
+            except Exception:
+                thread = None
+        if thread is None or not hasattr(thread, "send"):
+            return
+
+        kind = (alert_type or "").strip().lower()
+        if kind == "timeout":
+            text = f"<@&{alert_role_id}> Task **timed out**."
+        elif kind == "failed":
+            text = f"<@&{alert_role_id}> Task **failed**."
+        else:
+            text = f"<@&{alert_role_id}> Task alert: **{kind or alert_type}**."
+
+        try:
+            await thread.send(text)
+        except Exception:
+            return
+
+        try:
+            await self._store.save_alert(guild_id, thread_id, alert_type)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Progress tracking (mirrors Telegram notification handlers)

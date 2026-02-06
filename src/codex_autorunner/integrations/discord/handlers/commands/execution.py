@@ -92,6 +92,11 @@ class ExecutionCommands:
             )
             self._turn_contexts[turn_key] = ctx
 
+            try:
+                await self._update_presence()
+            except Exception:
+                pass
+
             # ---- 6. Start progress tracking ----
             agent = record.agent or DEFAULT_AGENT
             model = record.model or DEFAULT_AGENT_MODELS.get(agent, "default")
@@ -118,6 +123,17 @@ class ExecutionCommands:
             if record.sandbox_policy:
                 sandbox_policy = record.sandbox_policy
 
+            if (
+                isinstance(ctx.guild_id, int)
+                and not isinstance(ctx.guild_id, bool)
+                and isinstance(thread_id, int)
+                and not isinstance(thread_id, bool)
+            ):
+                try:
+                    await self._update_task_state(ctx.guild_id, thread_id, "running")
+                except Exception:
+                    pass
+
             # ---- 8. Start the turn ----
             turn_handle = await client.turn_start(
                 codex_thread_id,
@@ -142,7 +158,7 @@ class ExecutionCommands:
                 response_text = "(No agent response.)"
 
             # ---- 11. Deliver response ----
-            await self._deliver_turn_response(
+            response_message_id = await self._deliver_turn_response(
                 channel_id,
                 thread_id=thread_id,
                 placeholder_id=placeholder_id,
@@ -151,11 +167,60 @@ class ExecutionCommands:
             # Placeholder was consumed by _deliver_turn_response
             placeholder_id = None
 
+            agent_response_url: Optional[str] = None
+            if (
+                isinstance(ctx.guild_id, int)
+                and not isinstance(ctx.guild_id, bool)
+                and isinstance(thread_id, int)
+                and not isinstance(thread_id, bool)
+                and isinstance(response_message_id, int)
+                and response_message_id
+            ):
+                agent_response_url = (
+                    f"https://discord.com/channels/{ctx.guild_id}/"
+                    f"{target_id}/{response_message_id}"
+                )
+
             # ---- 12. Update record ----
             record.turn_count = (record.turn_count or 0) + 1
             record.last_turn_at = now_iso()
             record.updated_at = now_iso()
             await self._store.save_topic(topic_key, record)
+
+            end_state = "done"
+            status = result.status
+            if isinstance(status, str):
+                status_key = status.strip().lower()
+                if status_key and status_key != "completed":
+                    if status_key in {"interrupted", "cancelled", "canceled", "aborted"}:
+                        end_state = "stopped"
+                    elif status_key == "timeout":
+                        end_state = "timeout"
+                    else:
+                        end_state = "failed"
+
+            if (
+                isinstance(ctx.guild_id, int)
+                and not isinstance(ctx.guild_id, bool)
+                and isinstance(thread_id, int)
+                and not isinstance(thread_id, bool)
+            ):
+                try:
+                    await self._update_task_state(
+                        ctx.guild_id,
+                        thread_id,
+                        end_state,
+                        agent_response_url=agent_response_url,
+                    )
+                except Exception:
+                    pass
+                if end_state in {"failed", "timeout"}:
+                    try:
+                        await self._maybe_send_task_alert(
+                            ctx.guild_id, thread_id, end_state
+                        )
+                    except Exception:
+                        pass
 
             log_event(
                 self._logger,
@@ -174,6 +239,20 @@ class ExecutionCommands:
                 "discord.turn.timeout",
                 topic_key=topic_key,
             )
+            if (
+                isinstance(getattr(record, "guild_id", None), int)
+                and not isinstance(getattr(record, "guild_id", None), bool)
+                and isinstance(thread_id, int)
+                and not isinstance(thread_id, bool)
+            ):
+                try:
+                    await self._update_task_state(record.guild_id, thread_id, "timeout")
+                except Exception:
+                    pass
+                try:
+                    await self._maybe_send_task_alert(record.guild_id, thread_id, "timeout")
+                except Exception:
+                    pass
             if placeholder_id:
                 await self._edit_message(target_id, placeholder_id, "Turn timed out.")
                 placeholder_id = None
@@ -185,6 +264,16 @@ class ExecutionCommands:
                 "discord.turn.cancelled",
                 topic_key=topic_key,
             )
+            if (
+                isinstance(getattr(record, "guild_id", None), int)
+                and not isinstance(getattr(record, "guild_id", None), bool)
+                and isinstance(thread_id, int)
+                and not isinstance(thread_id, bool)
+            ):
+                try:
+                    await self._update_task_state(record.guild_id, thread_id, "stopped")
+                except Exception:
+                    pass
             if placeholder_id:
                 await self._edit_message(target_id, placeholder_id, "Turn cancelled.")
                 placeholder_id = None
@@ -197,6 +286,20 @@ class ExecutionCommands:
                 topic_key=topic_key,
                 exc=exc,
             )
+            if (
+                isinstance(getattr(record, "guild_id", None), int)
+                and not isinstance(getattr(record, "guild_id", None), bool)
+                and isinstance(thread_id, int)
+                and not isinstance(thread_id, bool)
+            ):
+                try:
+                    await self._update_task_state(record.guild_id, thread_id, "failed")
+                except Exception:
+                    pass
+                try:
+                    await self._maybe_send_task_alert(record.guild_id, thread_id, "failed")
+                except Exception:
+                    pass
             error_text = f"Turn failed: {exc}"
             if len(error_text) > 200:
                 error_text = error_text[:200] + "..."
@@ -211,6 +314,10 @@ class ExecutionCommands:
             if turn_key is not None:
                 self._turn_contexts.pop(turn_key, None)
                 self._clear_turn_progress(turn_key)
+            try:
+                await self._update_presence()
+            except Exception:
+                pass
             semaphore.release()
 
     async def _cmd_run_impl(self, interaction: Any, prompt: str) -> None:
@@ -219,22 +326,13 @@ class ExecutionCommands:
 
         guild_id = interaction.guild_id
         channel = interaction.channel
-        if isinstance(channel, _discord.Thread):
+        in_thread = isinstance(channel, _discord.Thread)
+        if in_thread:
             channel_id = channel.parent_id
             thread_id = channel.id
         else:
             channel_id = channel.id
             thread_id = None
-
-        from ...helpers import build_topic_key
-
-        topic_key = build_topic_key(guild_id, channel_id, thread_id)
-
-        if self._is_turn_active(topic_key):
-            await interaction.followup.send(
-                "A task is already running in this context. Use `/stop` first."
-            )
-            return
 
         # Check workspace binding
         channel_key = f"{guild_id}:{channel_id}"
@@ -245,10 +343,177 @@ class ExecutionCommands:
             )
             return
 
-        # Create or get topic
+        from ...helpers import build_topic_key
+
+        workspace_id: Optional[str] = None
+        tasks_forum_id: Optional[int] = None
+
+        # Fast-path: if invoked inside a scaffolded tasks channel, we know the workspace id.
+        try:
+            rows = await self._store.list_scaffolded_channels(guild_id)
+        except Exception:
+            rows = []
+
+        for _gid, ws_id, ch_type, ch_id, _created_at in rows:
+            if ch_type == "tasks" and ch_id == channel_id:
+                workspace_id = ws_id
+                tasks_forum_id = ch_id
+                break
+
+        # Otherwise: map the bound workspace path back to a hub repo id.
+        if workspace_id is None and self._hub_supervisor is not None:
+            try:
+                from pathlib import Path
+
+                binding_path = Path(binding).expanduser().resolve()
+                repos = self._hub_supervisor.list_repos()
+                for repo in repos:
+                    repo_id = getattr(repo, "id", None)
+                    repo_path = getattr(repo, "path", None)
+                    if not isinstance(repo_id, str) or not repo_id:
+                        continue
+                    if repo_path is None:
+                        continue
+                    try:
+                        candidate = Path(str(repo_path)).expanduser().resolve()
+                    except Exception:
+                        continue
+                    if candidate == binding_path:
+                        workspace_id = repo_id
+                        break
+            except Exception:
+                workspace_id = None
+
+        if (
+            thread_id is None
+            and isinstance(workspace_id, str)
+            and workspace_id
+            and tasks_forum_id is None
+        ):
+            tasks_forum_id = await self._store.get_scaffolded_channel(
+                guild_id, workspace_id, "tasks"
+            )
+
+        # Forum-backed tasks: /run in a bound workspace creates a forum thread when scaffolded.
+        channel_kind = str(self._config.scaffold.tasks_channel_kind or "").strip().lower()
+        if (
+            not in_thread
+            and thread_id is None
+            and channel_kind == "forum"
+            and isinstance(workspace_id, str)
+            and workspace_id
+            and isinstance(tasks_forum_id, int)
+            and not isinstance(tasks_forum_id, bool)
+        ):
+            guild = interaction.guild
+            if guild is None:
+                await interaction.followup.send("`/run` must be run inside a guild.")
+                return
+
+            try:
+                thread, _root = await self._create_forum_task(
+                    guild, workspace_id, tasks_forum_id, prompt, interaction.user
+                )
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "discord.task.create_failed",
+                    guild_id=guild_id,
+                    workspace_id=workspace_id,
+                    forum_channel_id=tasks_forum_id,
+                    exc=exc,
+                )
+                await interaction.followup.send(f"Failed to create task: {exc}")
+                return
+
+            channel_id = tasks_forum_id
+            thread_id = thread.id
+            topic_key = build_topic_key(guild_id, channel_id, thread_id)
+
+            # Ensure the tasks forum itself is bound for reruns and state resolution.
+            try:
+                forum_key = f"{guild_id}:{tasks_forum_id}"
+                existing = await self._store.get_channel_binding(forum_key)
+                if existing is None:
+                    await self._store.set_channel_binding(forum_key, binding)
+            except Exception:
+                pass
+
+            record = await self._store.get_topic(topic_key)
+            if record is None:
+                from ...state import DiscordTopicRecord
+
+                approval_mode = self._config.defaults.approval_mode
+                try:
+                    mode_override = self._resolve_approval_mode_for_user(interaction)
+                    if isinstance(mode_override, str) and mode_override:
+                        approval_mode = mode_override
+                except Exception:
+                    pass
+
+                record = DiscordTopicRecord(
+                    topic_key=topic_key,
+                    guild_id=guild_id,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    workspace_path=binding,
+                    approval_mode=approval_mode,
+                    created_at=now_iso(),
+                    updated_at=now_iso(),
+                )
+                await self._store.save_topic(topic_key, record)
+            elif not record.workspace_path:
+                record.workspace_path = binding
+                record.updated_at = now_iso()
+                await self._store.save_topic(topic_key, record)
+
+            log_event(
+                self._logger,
+                logging.INFO,
+                "discord.run.started",
+                topic_key=topic_key,
+                prompt_preview=prompt[:80],
+            )
+
+            try:
+                await interaction.followup.send(
+                    f"Task created: <#{thread.id}>", ephemeral=True
+                )
+            except Exception:
+                pass
+
+            self._spawn_task(
+                self._execute_turn(
+                    topic_key,
+                    prompt,
+                    channel_id=channel_id,
+                    thread_id=thread_id,
+                    reply_to=None,
+                    record=record,
+                )
+            )
+            return
+
+        topic_key = build_topic_key(guild_id, channel_id, thread_id)
+
+        if self._is_turn_active(topic_key):
+            await interaction.followup.send(
+                "A task is already running in this context. Use `/stop` first."
+            )
+            return
+
         record = await self._store.get_topic(topic_key)
         if record is None:
             from ...state import DiscordTopicRecord
+
+            approval_mode = self._config.defaults.approval_mode
+            try:
+                mode_override = self._resolve_approval_mode_for_user(interaction)
+                if isinstance(mode_override, str) and mode_override:
+                    approval_mode = mode_override
+            except Exception:
+                pass
 
             record = DiscordTopicRecord(
                 topic_key=topic_key,
@@ -256,10 +521,14 @@ class ExecutionCommands:
                 channel_id=channel_id,
                 thread_id=thread_id,
                 workspace_path=binding,
-                approval_mode=self._config.defaults.approval_mode,
+                approval_mode=approval_mode,
                 created_at=now_iso(),
                 updated_at=now_iso(),
             )
+            await self._store.save_topic(topic_key, record)
+        elif not record.workspace_path:
+            record.workspace_path = binding
+            record.updated_at = now_iso()
             await self._store.save_topic(topic_key, record)
 
         log_event(
@@ -307,6 +576,11 @@ class ExecutionCommands:
 
         ok = await self._interrupt_turn(topic_key)
         if ok:
+            if thread_id is not None:
+                try:
+                    await self._update_task_state(guild_id, thread_id, "stopped")
+                except Exception:
+                    pass
             await interaction.followup.send("Task interrupted.", ephemeral=True)
         else:
             await interaction.followup.send("Failed to interrupt task.", ephemeral=True)

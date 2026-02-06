@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +15,7 @@ from ...core.utils import (
     find_repo_root,
     is_within,
 )
+from .constants import THREAD_NAME_MAX_LEN
 
 # ---------------------------------------------------------------------------
 # Shared data classes
@@ -85,6 +87,27 @@ def truncate(text: str, max_len: int, suffix: str = "...") -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - len(suffix)] + suffix
+
+
+def sanitize_thread_name(prompt: str) -> str:
+    """Sanitize a prompt into a Discord thread name (max 100 chars)."""
+    if not isinstance(prompt, str):
+        prompt = str(prompt) if prompt is not None else ""
+    text = prompt.strip()
+    if not text:
+        return "task"
+
+    text = "".join(ch if ch.isprintable() else " " for ch in text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if not text:
+        return "task"
+
+    prefix = "task-"
+    max_body = max(0, THREAD_NAME_MAX_LEN - len(prefix))
+    body = text[:max_body].strip()
+    if not body:
+        return "task"
+    return prefix + body
 
 
 # ---------------------------------------------------------------------------

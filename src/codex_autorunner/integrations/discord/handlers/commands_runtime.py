@@ -34,6 +34,26 @@ class DiscordCommandHandlers:
         tree = self._bot.tree
         specs = build_slash_command_specs()
 
+        @tree.command(
+            name="setup",
+            description="Scaffold swarm control surface channels",
+            default_member_permissions=discord.Permissions(administrator=True),
+        )
+        async def cmd_setup(interaction: discord.Interaction) -> None:
+            if hasattr(self, "_check_rbac"):
+                allowed = await self._check_rbac(interaction, "can_setup")  # type: ignore[attr-defined]
+                if not allowed:
+                    try:
+                        await interaction.response.send_message(
+                            "You do not have permission to run `/setup`.",
+                            ephemeral=True,
+                        )
+                    except Exception:
+                        pass
+                    return
+            await interaction.response.defer()
+            await self._cmd_setup_impl(interaction)
+
         @tree.command(name="run", description="Run an agent task")
         @app_commands.describe(prompt="The task to run")
         async def cmd_run(interaction: discord.Interaction, prompt: str) -> None:
@@ -94,6 +114,32 @@ class DiscordCommandHandlers:
         async def cmd_health(interaction: discord.Interaction) -> None:
             await self._handle_slash_health(interaction)
 
+        @tree.command(name="workspaces", description="List scaffolded workspaces")
+        async def cmd_workspaces(interaction: discord.Interaction) -> None:
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_workspaces_impl(interaction)
+
+        tasks_group = app_commands.Group(
+            name="tasks", description="Task triage and navigation"
+        )
+
+        @tasks_group.command(name="list", description="List tasks")
+        @app_commands.describe(workspace="Workspace id (optional)", tag="Tag/state (optional)")
+        async def cmd_tasks_list(
+            interaction: discord.Interaction,
+            workspace: Optional[str] = None,
+            tag: Optional[str] = None,
+        ) -> None:
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_tasks_list_impl(interaction, workspace, tag)
+
+        @tasks_group.command(name="mine", description="List tasks created by you")
+        async def cmd_tasks_mine(interaction: discord.Interaction) -> None:
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_tasks_mine_impl(interaction)
+
+        tree.add_command(tasks_group)
+
         log_event(
             self._logger,
             logging.INFO,
@@ -106,16 +152,49 @@ class DiscordCommandHandlers:
     # ------------------------------------------------------------------
 
     async def _handle_slash_run(self, interaction: Any, prompt: str) -> None:
+        if hasattr(self, "_check_rbac"):
+            allowed = await self._check_rbac(interaction, "can_run")  # type: ignore[attr-defined]
+            if not allowed:
+                try:
+                    await interaction.response.send_message(
+                        "You do not have permission to run tasks.",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+                return
         await interaction.response.defer()
         await self._cmd_run_impl(interaction, prompt)
 
     async def _handle_slash_stop(self, interaction: Any) -> None:
+        if hasattr(self, "_check_rbac"):
+            allowed = await self._check_rbac(interaction, "can_stop")  # type: ignore[attr-defined]
+            if not allowed:
+                try:
+                    await interaction.response.send_message(
+                        "You do not have permission to stop tasks.",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+                return
         await interaction.response.defer(ephemeral=True)
         await self._cmd_stop_impl(interaction)
 
     async def _handle_slash_bind(
         self, interaction: Any, workspace: Optional[str]
     ) -> None:
+        if hasattr(self, "_check_rbac"):
+            allowed = await self._check_rbac(interaction, "can_bind")  # type: ignore[attr-defined]
+            if not allowed:
+                try:
+                    await interaction.response.send_message(
+                        "You do not have permission to bind workspaces.",
+                        ephemeral=True,
+                    )
+                except Exception:
+                    pass
+                return
         await interaction.response.defer(ephemeral=True)
         if not workspace:
             await interaction.followup.send(

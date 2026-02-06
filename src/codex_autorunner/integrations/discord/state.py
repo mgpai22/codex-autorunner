@@ -7,6 +7,7 @@ import logging
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional, TypeVar, cast
 
@@ -22,7 +23,7 @@ APPROVAL_MODE_SAFE = "safe"
 APPROVAL_MODES = {APPROVAL_MODE_YOLO, APPROVAL_MODE_SAFE}
 AGENT_VALUES = {"codex", "opencode"}
 
-DISCORD_SCHEMA_VERSION = 1
+DISCORD_SCHEMA_VERSION = 2
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,27 @@ def _parse_json_payload(raw: Optional[str]) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return data if isinstance(data, dict) else {}
+
+
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not isinstance(value, str) or not value:
+        return None
+    text = value.strip()
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        pass
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -606,6 +628,197 @@ class DiscordStateStore:
         await self._run(self._clear_pending_approvals_for_topic_sync, key)
 
     # ------------------------------------------------------------------
+    # Scaffolded channels
+    # ------------------------------------------------------------------
+
+    async def save_scaffolded_channel(
+        self,
+        guild_id: int,
+        workspace_id: str,
+        channel_type: str,
+        discord_channel_id: int,
+    ) -> None:
+        await self._run(
+            self._save_scaffolded_channel_sync,
+            guild_id,
+            workspace_id,
+            channel_type,
+            discord_channel_id,
+        )
+
+    async def get_scaffolded_channel(
+        self, guild_id: int, workspace_id: str, channel_type: str
+    ) -> Optional[int]:
+        return await self._run(
+            self._get_scaffolded_channel_sync, guild_id, workspace_id, channel_type
+        )
+
+    async def list_scaffolded_channels(
+        self, guild_id: int
+    ) -> list[tuple[int, str, str, int, str]]:
+        return await self._run(self._list_scaffolded_channels_sync, guild_id)
+
+    async def delete_scaffolded_channel(
+        self, guild_id: int, workspace_id: str, channel_type: str
+    ) -> None:
+        await self._run(
+            self._delete_scaffolded_channel_sync, guild_id, workspace_id, channel_type
+        )
+
+    # ------------------------------------------------------------------
+    # Forum tags
+    # ------------------------------------------------------------------
+
+    async def save_forum_tag(
+        self,
+        guild_id: int,
+        workspace_id: str,
+        forum_channel_id: int,
+        tag_name: str,
+        tag_id: int,
+    ) -> None:
+        await self._run(
+            self._save_forum_tag_sync,
+            guild_id,
+            workspace_id,
+            forum_channel_id,
+            tag_name,
+            tag_id,
+        )
+
+    async def get_forum_tags(self, guild_id: int, workspace_id: str) -> dict[str, int]:
+        return await self._run(self._get_forum_tags_sync, guild_id, workspace_id)
+
+    async def delete_forum_tag(self, guild_id: int, workspace_id: str, tag_name: str) -> None:
+        await self._run(self._delete_forum_tag_sync, guild_id, workspace_id, tag_name)
+
+    # ------------------------------------------------------------------
+    # Tasks
+    # ------------------------------------------------------------------
+
+    async def save_task(
+        self,
+        guild_id: int,
+        workspace_id: str,
+        forum_channel_id: int,
+        thread_id: int,
+        root_message_id: int,
+        created_by_user_id: Optional[int],
+        initial_prompt: Optional[str],
+    ) -> None:
+        await self._run(
+            self._save_task_sync,
+            guild_id,
+            workspace_id,
+            forum_channel_id,
+            thread_id,
+            root_message_id,
+            created_by_user_id,
+            initial_prompt,
+        )
+
+    async def get_task(self, guild_id: int, thread_id: int) -> Optional[dict[str, Any]]:
+        return await self._run(self._get_task_sync, guild_id, thread_id)
+
+    async def list_tasks(
+        self,
+        guild_id: int,
+        workspace_id: Optional[str] = None,
+        state: Optional[str] = None,
+        created_by_user_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        return await self._run(
+            self._list_tasks_sync,
+            guild_id,
+            workspace_id,
+            state,
+            created_by_user_id,
+        )
+
+    async def update_task_state(self, guild_id: int, thread_id: int, state: str) -> None:
+        await self._run(self._update_task_state_sync, guild_id, thread_id, state)
+
+    async def update_task_activity(
+        self, guild_id: int, thread_id: int, message_id: int
+    ) -> None:
+        await self._run(self._update_task_activity_sync, guild_id, thread_id, message_id)
+
+    # ------------------------------------------------------------------
+    # Alerts
+    # ------------------------------------------------------------------
+
+    async def save_alert(self, guild_id: int, thread_id: int, alert_type: str) -> None:
+        await self._run(self._save_alert_sync, guild_id, thread_id, alert_type)
+
+    async def get_alert(
+        self, guild_id: int, thread_id: int, alert_type: str
+    ) -> Optional[str]:
+        return await self._run(self._get_alert_sync, guild_id, thread_id, alert_type)
+
+    async def should_alert(
+        self,
+        guild_id: int,
+        thread_id: int,
+        alert_type: str,
+        cooldown_seconds: int,
+    ) -> bool:
+        return await self._run(
+            self._should_alert_sync,
+            guild_id,
+            thread_id,
+            alert_type,
+            cooldown_seconds,
+        )
+
+    # ------------------------------------------------------------------
+    # Agent webhooks
+    # ------------------------------------------------------------------
+
+    async def save_webhook(
+        self,
+        guild_id: int,
+        channel_id: int,
+        agent_name: str,
+        webhook_id: int,
+        webhook_token: str,
+    ) -> None:
+        await self._run(
+            self._save_webhook_sync,
+            guild_id,
+            channel_id,
+            agent_name,
+            webhook_id,
+            webhook_token,
+        )
+
+    async def get_webhook(
+        self, guild_id: int, channel_id: int, agent_name: str
+    ) -> Optional[tuple[int, str]]:
+        return await self._run(
+            self._get_webhook_sync, guild_id, channel_id, agent_name
+        )
+
+    async def list_webhooks(
+        self, guild_id: int, channel_id: int
+    ) -> list[tuple[str, int, str, str]]:
+        return await self._run(self._list_webhooks_sync, guild_id, channel_id)
+
+    # ------------------------------------------------------------------
+    # Dashboard
+    # ------------------------------------------------------------------
+
+    async def save_dashboard(self, guild_id: int, channel_id: int, message_id: int) -> None:
+        await self._run(self._save_dashboard_sync, guild_id, channel_id, message_id)
+
+    async def get_dashboard(
+        self, guild_id: int
+    ) -> Optional[tuple[int, int, str, Optional[str]]]:
+        return await self._run(self._get_dashboard_sync, guild_id)
+
+    async def update_dashboard_timestamp(self, guild_id: int) -> None:
+        await self._run(self._update_dashboard_timestamp_sync, guild_id)
+
+    # ------------------------------------------------------------------
     # Internal: async executor bridge
     # ------------------------------------------------------------------
 
@@ -691,6 +904,84 @@ class DiscordStateStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_dc_outbox_created
                     ON discord_outbox(created_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_scaffolded_channels (
+                    guild_id INTEGER NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    channel_type TEXT NOT NULL,
+                    discord_channel_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, workspace_id, channel_type)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_forum_tags (
+                    guild_id INTEGER NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    forum_channel_id INTEGER NOT NULL,
+                    tag_name TEXT NOT NULL,
+                    tag_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, workspace_id, tag_name)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_tasks (
+                    guild_id INTEGER NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    forum_channel_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL,
+                    root_message_id INTEGER NOT NULL,
+                    created_by_user_id INTEGER,
+                    initial_prompt TEXT,
+                    created_at TEXT NOT NULL,
+                    last_state TEXT,
+                    last_state_at TEXT,
+                    last_activity_message_id INTEGER,
+                    PRIMARY KEY (guild_id, thread_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_alerts (
+                    guild_id INTEGER NOT NULL,
+                    thread_id INTEGER NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    last_sent_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, thread_id, alert_type)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_agent_webhooks (
+                    guild_id INTEGER NOT NULL,
+                    channel_id INTEGER NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    webhook_id INTEGER NOT NULL,
+                    webhook_token TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (guild_id, channel_id, agent_name)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_dashboard (
+                    guild_id INTEGER NOT NULL PRIMARY KEY,
+                    channel_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    pinned_at TEXT NOT NULL,
+                    last_updated_at TEXT
+                )
                 """
             )
             now = now_iso()
@@ -1088,6 +1379,629 @@ class DiscordStateStore:
                  WHERE json_extract(data, '$.topic_key') = ?
                 """,
                 (key,),
+            )
+
+    # ------------------------------------------------------------------
+    # Sync: scaffolded channels
+    # ------------------------------------------------------------------
+
+    def _save_scaffolded_channel_sync(
+        self,
+        guild_id: int,
+        workspace_id: str,
+        channel_type: str,
+        discord_channel_id: int,
+    ) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+        if not isinstance(channel_type, str) or not channel_type:
+            return
+        if not isinstance(discord_channel_id, int) or isinstance(discord_channel_id, bool):
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_scaffolded_channels
+                    (guild_id, workspace_id, channel_type, discord_channel_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, workspace_id, channel_type) DO UPDATE SET
+                    discord_channel_id=excluded.discord_channel_id,
+                    created_at=excluded.created_at
+                """,
+                (guild_id, workspace_id, channel_type, discord_channel_id, now),
+            )
+
+    def _get_scaffolded_channel_sync(
+        self, guild_id: int, workspace_id: str, channel_type: str
+    ) -> Optional[int]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return None
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return None
+        if not isinstance(channel_type, str) or not channel_type:
+            return None
+        conn = self._connection_sync()
+        row = conn.execute(
+            """
+            SELECT discord_channel_id FROM discord_scaffolded_channels
+             WHERE guild_id = ? AND workspace_id = ? AND channel_type = ?
+            """,
+            (guild_id, workspace_id, channel_type),
+        ).fetchone()
+        if row is None:
+            return None
+        channel_id = row["discord_channel_id"]
+        if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+            return None
+        return channel_id
+
+    def _list_scaffolded_channels_sync(
+        self, guild_id: int
+    ) -> list[tuple[int, str, str, int, str]]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return []
+        conn = self._connection_sync()
+        rows = conn.execute(
+            """
+            SELECT guild_id, workspace_id, channel_type, discord_channel_id, created_at
+              FROM discord_scaffolded_channels
+             WHERE guild_id = ?
+             ORDER BY workspace_id, channel_type
+            """,
+            (guild_id,),
+        )
+        records: list[tuple[int, str, str, int, str]] = []
+        for row in rows:
+            created_at = row["created_at"]
+            workspace_id = row["workspace_id"]
+            channel_type = row["channel_type"]
+            channel_id = row["discord_channel_id"]
+            if (
+                not isinstance(created_at, str)
+                or not isinstance(workspace_id, str)
+                or not isinstance(channel_type, str)
+                or not isinstance(channel_id, int)
+                or isinstance(channel_id, bool)
+            ):
+                continue
+            records.append((guild_id, workspace_id, channel_type, channel_id, created_at))
+        return records
+
+    def _delete_scaffolded_channel_sync(
+        self, guild_id: int, workspace_id: str, channel_type: str
+    ) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+        if not isinstance(channel_type, str) or not channel_type:
+            return
+        conn = self._connection_sync()
+        with conn:
+            conn.execute(
+                """
+                DELETE FROM discord_scaffolded_channels
+                 WHERE guild_id = ? AND workspace_id = ? AND channel_type = ?
+                """,
+                (guild_id, workspace_id, channel_type),
+            )
+
+    # ------------------------------------------------------------------
+    # Sync: forum tags
+    # ------------------------------------------------------------------
+
+    def _save_forum_tag_sync(
+        self,
+        guild_id: int,
+        workspace_id: str,
+        forum_channel_id: int,
+        tag_name: str,
+        tag_id: int,
+    ) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+        if not isinstance(forum_channel_id, int) or isinstance(forum_channel_id, bool):
+            return
+        if not isinstance(tag_name, str) or not tag_name:
+            return
+        if not isinstance(tag_id, int) or isinstance(tag_id, bool):
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_forum_tags
+                    (guild_id, workspace_id, forum_channel_id, tag_name, tag_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, workspace_id, tag_name) DO UPDATE SET
+                    forum_channel_id=excluded.forum_channel_id,
+                    tag_id=excluded.tag_id,
+                    created_at=excluded.created_at
+                """,
+                (guild_id, workspace_id, forum_channel_id, tag_name, tag_id, now),
+            )
+
+    def _get_forum_tags_sync(self, guild_id: int, workspace_id: str) -> dict[str, int]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return {}
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return {}
+        conn = self._connection_sync()
+        tags: dict[str, int] = {}
+        for row in conn.execute(
+            """
+            SELECT tag_name, tag_id FROM discord_forum_tags
+             WHERE guild_id = ? AND workspace_id = ?
+             ORDER BY tag_name
+            """,
+            (guild_id, workspace_id),
+        ):
+            tag_name = row["tag_name"]
+            tag_id = row["tag_id"]
+            if not isinstance(tag_name, str) or not tag_name:
+                continue
+            if not isinstance(tag_id, int) or isinstance(tag_id, bool):
+                continue
+            tags[tag_name] = tag_id
+        return tags
+
+    def _delete_forum_tag_sync(self, guild_id: int, workspace_id: str, tag_name: str) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+        if not isinstance(tag_name, str) or not tag_name:
+            return
+        conn = self._connection_sync()
+        with conn:
+            conn.execute(
+                """
+                DELETE FROM discord_forum_tags
+                 WHERE guild_id = ? AND workspace_id = ? AND tag_name = ?
+                """,
+                (guild_id, workspace_id, tag_name),
+            )
+
+    # ------------------------------------------------------------------
+    # Sync: tasks
+    # ------------------------------------------------------------------
+
+    def _save_task_sync(
+        self,
+        guild_id: int,
+        workspace_id: str,
+        forum_channel_id: int,
+        thread_id: int,
+        root_message_id: int,
+        created_by_user_id: Optional[int],
+        initial_prompt: Optional[str],
+    ) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(workspace_id, str) or not workspace_id:
+            return
+        if not isinstance(forum_channel_id, int) or isinstance(forum_channel_id, bool):
+            return
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return
+        if not isinstance(root_message_id, int) or isinstance(root_message_id, bool):
+            return
+        if created_by_user_id is not None and (
+            not isinstance(created_by_user_id, int) or isinstance(created_by_user_id, bool)
+        ):
+            created_by_user_id = None
+        if initial_prompt is not None and not isinstance(initial_prompt, str):
+            initial_prompt = None
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_tasks (
+                    guild_id,
+                    workspace_id,
+                    forum_channel_id,
+                    thread_id,
+                    root_message_id,
+                    created_by_user_id,
+                    initial_prompt,
+                    created_at,
+                    last_state,
+                    last_state_at,
+                    last_activity_message_id
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, thread_id) DO UPDATE SET
+                    workspace_id=excluded.workspace_id,
+                    forum_channel_id=excluded.forum_channel_id,
+                    root_message_id=excluded.root_message_id,
+                    created_by_user_id=excluded.created_by_user_id,
+                    initial_prompt=excluded.initial_prompt
+                """,
+                (
+                    guild_id,
+                    workspace_id,
+                    forum_channel_id,
+                    thread_id,
+                    root_message_id,
+                    created_by_user_id,
+                    initial_prompt,
+                    now,
+                    "queued",
+                    now,
+                    None,
+                ),
+            )
+
+    def _get_task_sync(self, guild_id: int, thread_id: int) -> Optional[dict[str, Any]]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return None
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return None
+        conn = self._connection_sync()
+        row = conn.execute(
+            """
+            SELECT
+                guild_id,
+                workspace_id,
+                forum_channel_id,
+                thread_id,
+                root_message_id,
+                created_by_user_id,
+                initial_prompt,
+                created_at,
+                last_state,
+                last_state_at,
+                last_activity_message_id
+            FROM discord_tasks
+             WHERE guild_id = ? AND thread_id = ?
+            """,
+            (guild_id, thread_id),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def _list_tasks_sync(
+        self,
+        guild_id: int,
+        workspace_id: Optional[str],
+        state: Optional[str],
+        created_by_user_id: Optional[int],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return []
+        clauses = ["guild_id = ?"]
+        params: list[Any] = [guild_id]
+        if isinstance(workspace_id, str) and workspace_id:
+            clauses.append("workspace_id = ?")
+            params.append(workspace_id)
+        if isinstance(state, str) and state:
+            clauses.append("last_state = ?")
+            params.append(state)
+        if (
+            created_by_user_id is not None
+            and isinstance(created_by_user_id, int)
+            and not isinstance(created_by_user_id, bool)
+        ):
+            clauses.append("created_by_user_id = ?")
+            params.append(created_by_user_id)
+        query = (
+            "SELECT "
+            "guild_id, "
+            "workspace_id, "
+            "forum_channel_id, "
+            "thread_id, "
+            "root_message_id, "
+            "created_by_user_id, "
+            "initial_prompt, "
+            "created_at, "
+            "last_state, "
+            "last_state_at, "
+            "last_activity_message_id "
+            "FROM discord_tasks "
+            "WHERE "
+            + " AND ".join(clauses)
+            + " ORDER BY created_at DESC"
+        )
+        conn = self._connection_sync()
+        records: list[dict[str, Any]] = []
+        for row in conn.execute(query, tuple(params)):
+            records.append(dict(row))
+        return records
+
+    def _update_task_state_sync(self, guild_id: int, thread_id: int, state: str) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return
+        if not isinstance(state, str) or not state:
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                UPDATE discord_tasks
+                   SET last_state = ?, last_state_at = ?
+                 WHERE guild_id = ? AND thread_id = ?
+                """,
+                (state, now, guild_id, thread_id),
+            )
+
+    def _update_task_activity_sync(
+        self, guild_id: int, thread_id: int, message_id: int
+    ) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return
+        conn = self._connection_sync()
+        with conn:
+            conn.execute(
+                """
+                UPDATE discord_tasks
+                   SET last_activity_message_id = ?
+                 WHERE guild_id = ? AND thread_id = ?
+                """,
+                (message_id, guild_id, thread_id),
+            )
+
+    # ------------------------------------------------------------------
+    # Sync: alerts
+    # ------------------------------------------------------------------
+
+    def _save_alert_sync(self, guild_id: int, thread_id: int, alert_type: str) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return
+        if not isinstance(alert_type, str) or not alert_type:
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_alerts (guild_id, thread_id, alert_type, last_sent_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(guild_id, thread_id, alert_type) DO UPDATE SET
+                    last_sent_at=excluded.last_sent_at
+                """,
+                (guild_id, thread_id, alert_type, now),
+            )
+
+    def _get_alert_sync(
+        self, guild_id: int, thread_id: int, alert_type: str
+    ) -> Optional[str]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return None
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return None
+        if not isinstance(alert_type, str) or not alert_type:
+            return None
+        conn = self._connection_sync()
+        row = conn.execute(
+            """
+            SELECT last_sent_at FROM discord_alerts
+             WHERE guild_id = ? AND thread_id = ? AND alert_type = ?
+            """,
+            (guild_id, thread_id, alert_type),
+        ).fetchone()
+        if row is None:
+            return None
+        last_sent_at = row["last_sent_at"]
+        return last_sent_at if isinstance(last_sent_at, str) else None
+
+    def _should_alert_sync(
+        self,
+        guild_id: int,
+        thread_id: int,
+        alert_type: str,
+        cooldown_seconds: int,
+    ) -> bool:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return False
+        if not isinstance(thread_id, int) or isinstance(thread_id, bool):
+            return False
+        if not isinstance(alert_type, str) or not alert_type:
+            return False
+        try:
+            cooldown = int(cooldown_seconds)
+        except (TypeError, ValueError):
+            cooldown = 0
+        if cooldown <= 0:
+            return True
+        last_sent_at = self._get_alert_sync(guild_id, thread_id, alert_type)
+        if last_sent_at is None:
+            return True
+        last_dt = _parse_timestamp(last_sent_at)
+        if last_dt is None:
+            return True
+        now_dt = _parse_timestamp(now_iso())
+        if now_dt is None:
+            return True
+        elapsed = (now_dt - last_dt).total_seconds()
+        return elapsed >= cooldown
+
+    # ------------------------------------------------------------------
+    # Sync: agent webhooks
+    # ------------------------------------------------------------------
+
+    def _save_webhook_sync(
+        self,
+        guild_id: int,
+        channel_id: int,
+        agent_name: str,
+        webhook_id: int,
+        webhook_token: str,
+    ) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+            return
+        if not isinstance(agent_name, str) or not agent_name:
+            return
+        if not isinstance(webhook_id, int) or isinstance(webhook_id, bool):
+            return
+        if not isinstance(webhook_token, str) or not webhook_token:
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_agent_webhooks
+                    (guild_id, channel_id, agent_name, webhook_id, webhook_token, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id, channel_id, agent_name) DO UPDATE SET
+                    webhook_id=excluded.webhook_id,
+                    webhook_token=excluded.webhook_token,
+                    created_at=excluded.created_at
+                """,
+                (guild_id, channel_id, agent_name, webhook_id, webhook_token, now),
+            )
+
+    def _get_webhook_sync(
+        self, guild_id: int, channel_id: int, agent_name: str
+    ) -> Optional[tuple[int, str]]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return None
+        if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+            return None
+        if not isinstance(agent_name, str) or not agent_name:
+            return None
+        conn = self._connection_sync()
+        row = conn.execute(
+            """
+            SELECT webhook_id, webhook_token FROM discord_agent_webhooks
+             WHERE guild_id = ? AND channel_id = ? AND agent_name = ?
+            """,
+            (guild_id, channel_id, agent_name),
+        ).fetchone()
+        if row is None:
+            return None
+        webhook_id = row["webhook_id"]
+        webhook_token = row["webhook_token"]
+        if not isinstance(webhook_id, int) or isinstance(webhook_id, bool):
+            return None
+        if not isinstance(webhook_token, str) or not webhook_token:
+            return None
+        return webhook_id, webhook_token
+
+    def _list_webhooks_sync(
+        self, guild_id: int, channel_id: int
+    ) -> list[tuple[str, int, str, str]]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return []
+        if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+            return []
+        conn = self._connection_sync()
+        records: list[tuple[str, int, str, str]] = []
+        for row in conn.execute(
+            """
+            SELECT agent_name, webhook_id, webhook_token, created_at
+              FROM discord_agent_webhooks
+             WHERE guild_id = ? AND channel_id = ?
+             ORDER BY agent_name
+            """,
+            (guild_id, channel_id),
+        ):
+            agent_name = row["agent_name"]
+            webhook_id = row["webhook_id"]
+            webhook_token = row["webhook_token"]
+            created_at = row["created_at"]
+            if not isinstance(agent_name, str) or not agent_name:
+                continue
+            if not isinstance(webhook_id, int) or isinstance(webhook_id, bool):
+                continue
+            if not isinstance(webhook_token, str) or not webhook_token:
+                continue
+            if not isinstance(created_at, str) or not created_at:
+                continue
+            records.append((agent_name, webhook_id, webhook_token, created_at))
+        return records
+
+    # ------------------------------------------------------------------
+    # Sync: dashboard
+    # ------------------------------------------------------------------
+
+    def _save_dashboard_sync(self, guild_id: int, channel_id: int, message_id: int) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+            return
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_dashboard
+                    (guild_id, channel_id, message_id, pinned_at, last_updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(guild_id) DO UPDATE SET
+                    channel_id=excluded.channel_id,
+                    message_id=excluded.message_id,
+                    pinned_at=excluded.pinned_at,
+                    last_updated_at=excluded.last_updated_at
+                """,
+                (guild_id, channel_id, message_id, now, now),
+            )
+
+    def _get_dashboard_sync(
+        self, guild_id: int
+    ) -> Optional[tuple[int, int, str, Optional[str]]]:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return None
+        conn = self._connection_sync()
+        row = conn.execute(
+            """
+            SELECT channel_id, message_id, pinned_at, last_updated_at
+              FROM discord_dashboard
+             WHERE guild_id = ?
+            """,
+            (guild_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        channel_id = row["channel_id"]
+        message_id = row["message_id"]
+        pinned_at = row["pinned_at"]
+        last_updated_at = row["last_updated_at"]
+        if not isinstance(channel_id, int) or isinstance(channel_id, bool):
+            return None
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            return None
+        if not isinstance(pinned_at, str) or not pinned_at:
+            return None
+        if last_updated_at is not None and not isinstance(last_updated_at, str):
+            last_updated_at = None
+        return channel_id, message_id, pinned_at, last_updated_at
+
+    def _update_dashboard_timestamp_sync(self, guild_id: int) -> None:
+        if not isinstance(guild_id, int) or isinstance(guild_id, bool):
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                UPDATE discord_dashboard
+                   SET last_updated_at = ?
+                 WHERE guild_id = ?
+                """,
+                (now, guild_id),
             )
 
 
