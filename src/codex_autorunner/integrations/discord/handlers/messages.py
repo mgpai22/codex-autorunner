@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional
 
 from ....core.logging_utils import log_event
+from ..constants import MAX_COALESCE_BUFFER_MESSAGES, MAX_COALESCE_DELAY_SECONDS
 from ..trigger_mode import should_respond, strip_bot_mention
 
 if TYPE_CHECKING:
@@ -97,11 +98,20 @@ async def handle_message(service: "DiscordBotService", message: Any) -> None:
     )
     if existing_buffer is not None:
         existing_buffer.texts.append(content)
-        if existing_buffer.timer_task and not existing_buffer.timer_task.done():
-            existing_buffer.timer_task.cancel()
-        existing_buffer.timer_task = asyncio.create_task(
-            _coalesce_timer(service, coalesce_key, coalesce_window)
-        )
+        elapsed = time.time() - existing_buffer.created_at
+        buffer_full = len(existing_buffer.texts) >= MAX_COALESCE_BUFFER_MESSAGES
+        delay_exceeded = elapsed >= MAX_COALESCE_DELAY_SECONDS
+        if buffer_full or delay_exceeded:
+            # Flush immediately – buffer is full or max delay exceeded
+            if existing_buffer.timer_task and not existing_buffer.timer_task.done():
+                existing_buffer.timer_task.cancel()
+            asyncio.create_task(_coalesce_timer(service, coalesce_key, 0))
+        else:
+            if existing_buffer.timer_task and not existing_buffer.timer_task.done():
+                existing_buffer.timer_task.cancel()
+            existing_buffer.timer_task = asyncio.create_task(
+                _coalesce_timer(service, coalesce_key, coalesce_window)
+            )
         return
 
     # Create new buffer

@@ -40,8 +40,10 @@ class WorkspaceCommands:
         from pathlib import Path
 
         workspace_path = Path(workspace).expanduser().resolve()
-        if not workspace_path.exists():
-            await interaction.followup.send(f"Path does not exist: `{workspace_path}`")
+        if not workspace_path.is_dir():
+            await interaction.followup.send(
+                f"Path is not a valid directory: `{workspace_path}`"
+            )
             return
 
         guild_id = interaction.guild_id

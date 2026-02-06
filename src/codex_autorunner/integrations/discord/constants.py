@@ -189,6 +189,8 @@ TRIGGER_MODE_OPTIONS = {"all", "mentions"}
 # Coalesce / overflow
 # ---------------------------------------------------------------------------
 DEFAULT_COALESCE_WINDOW_SECONDS = 0.5
+MAX_COALESCE_BUFFER_MESSAGES = 20
+MAX_COALESCE_DELAY_SECONDS = 10.0
 DEFAULT_MESSAGE_OVERFLOW = "split"
 MESSAGE_OVERFLOW_OPTIONS = {"split", "trim", "thread"}
 

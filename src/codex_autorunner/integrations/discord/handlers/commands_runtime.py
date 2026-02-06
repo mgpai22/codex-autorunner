@@ -124,6 +124,15 @@ class DiscordCommandHandlers:
             )
             return
 
+        from pathlib import Path
+
+        workspace_path = Path(workspace).expanduser().resolve()
+        if not workspace_path.is_dir():
+            await interaction.followup.send(
+                f"Path is not a valid directory: `{workspace}`", ephemeral=True
+            )
+            return
+
         guild_id = interaction.guild_id
         channel = interaction.channel
         if isinstance(channel, discord.Thread):
@@ -132,13 +141,13 @@ class DiscordCommandHandlers:
             channel_id = channel.id
 
         channel_key = f"{guild_id}:{channel_id}"
-        await self._store.set_channel_binding(channel_key, workspace)
+        await self._store.set_channel_binding(channel_key, str(workspace_path))
 
         from ..rendering import build_status_embed
 
-        embed = build_status_embed(workspace=workspace)
+        embed = build_status_embed(workspace=str(workspace_path))
         await interaction.followup.send(
-            f"Bound to `{workspace}`", embed=embed, ephemeral=True
+            f"Bound to `{workspace_path}`", embed=embed, ephemeral=True
         )
 
     async def _handle_slash_repos(self, interaction: Any) -> None:
