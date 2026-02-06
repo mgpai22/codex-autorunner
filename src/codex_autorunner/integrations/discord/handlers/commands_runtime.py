@@ -4,6 +4,7 @@ import logging
 from typing import TYPE_CHECKING, Any, Optional
 
 from ....core.logging_utils import log_event
+from ....core.state import now_iso
 from .commands_spec import build_slash_command_specs
 
 if TYPE_CHECKING:
@@ -106,13 +107,11 @@ class DiscordCommandHandlers:
 
     async def _handle_slash_run(self, interaction: Any, prompt: str) -> None:
         await interaction.response.defer()
-        await interaction.followup.send(
-            "Run command received. Execution will be wired in Phase 4."
-        )
+        await self._cmd_run_impl(interaction, prompt)
 
     async def _handle_slash_stop(self, interaction: Any) -> None:
         await interaction.response.defer(ephemeral=True)
-        await interaction.followup.send("Stop command received.", ephemeral=True)
+        await self._cmd_stop_impl(interaction)
 
     async def _handle_slash_bind(
         self, interaction: Any, workspace: Optional[str]
@@ -208,46 +207,243 @@ class DiscordCommandHandlers:
 
     async def _handle_slash_new(self, interaction: Any) -> None:
         await interaction.response.defer(ephemeral=True)
-        await interaction.followup.send("New conversation started.", ephemeral=True)
+        await self._cmd_new_impl(interaction)
 
     async def _handle_slash_resume(
         self, interaction: Any, thread_id: Optional[str]
     ) -> None:
         await interaction.response.defer(ephemeral=True)
-        await interaction.followup.send("Resume not yet implemented.", ephemeral=True)
+
+        guild_id = interaction.guild_id
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread):
+            channel_id = channel.parent_id
+            disc_thread_id = channel.id
+        else:
+            channel_id = channel.id
+            disc_thread_id = None
+
+        from ..helpers import build_topic_key
+
+        topic_key = build_topic_key(guild_id, channel_id, disc_thread_id)
+        record = await self._store.get_topic(topic_key)
+
+        if record is None:
+            await interaction.followup.send(
+                "No topic found. Use `/bind` first.", ephemeral=True
+            )
+            return
+
+        if not record.workspace_path:
+            await interaction.followup.send(
+                "No workspace bound. Use `/bind` first.", ephemeral=True
+            )
+            return
+
+        if thread_id:
+            # Direct resume with explicit thread ID
+            record.codex_thread_id = thread_id
+            record.updated_at = now_iso()
+            await self._store.save_topic(topic_key, record)
+            await interaction.followup.send(
+                f"Resumed thread `{thread_id}`.", ephemeral=True
+            )
+        else:
+            current = record.codex_thread_id
+            if current:
+                await interaction.followup.send(
+                    f"Current thread: `{current}`.\n"
+                    "Use `/resume <thread_id>` to switch, "
+                    "or `/new` to start fresh.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.followup.send(
+                    "No active thread. Use `/run` to start one, "
+                    "or `/resume <thread_id>` to resume a specific thread.",
+                    ephemeral=True,
+                )
 
     async def _handle_slash_model(self, interaction: Any, name: Optional[str]) -> None:
         await interaction.response.defer(ephemeral=True)
-        if name:
-            await interaction.followup.send(f"Model set to `{name}`.", ephemeral=True)
+
+        guild_id = interaction.guild_id
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread):
+            channel_id = channel.parent_id
+            thread_id = channel.id
         else:
+            channel_id = channel.id
+            thread_id = None
+
+        from ..helpers import build_topic_key
+
+        topic_key = build_topic_key(guild_id, channel_id, thread_id)
+
+        if name:
+            from ..constants import DEFAULT_AGENT, DEFAULT_AGENT_MODELS
+
+            def apply(record: Any) -> None:
+                record.model = name
+                record.updated_at = now_iso()
+
+            await self._store.update_topic_field(topic_key, apply)
             await interaction.followup.send(
-                "Current model: (use `/model <name>` to change)", ephemeral=True
+                f"Model set to `{name}`. Will apply on the next turn.", ephemeral=True
+            )
+        else:
+            record = await self._store.get_topic(topic_key)
+            current_model = record.model if record else None
+            if not current_model:
+                from ..constants import DEFAULT_AGENT, DEFAULT_AGENT_MODELS
+
+                agent = (record.agent if record else None) or DEFAULT_AGENT
+                current_model = DEFAULT_AGENT_MODELS.get(agent, "default")
+            await interaction.followup.send(
+                f"Current model: `{current_model}`. Use `/model <name>` to change.",
+                ephemeral=True,
             )
 
     async def _handle_slash_agent(self, interaction: Any, name: Optional[str]) -> None:
         await interaction.response.defer(ephemeral=True)
-        if name:
-            await interaction.followup.send(f"Agent set to `{name}`.", ephemeral=True)
+
+        guild_id = interaction.guild_id
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread):
+            channel_id = channel.parent_id
+            thread_id = channel.id
         else:
+            channel_id = channel.id
+            thread_id = None
+
+        from ..helpers import build_topic_key
+
+        topic_key = build_topic_key(guild_id, channel_id, thread_id)
+
+        if name:
+            from ..state import normalize_agent
+
+            normalized = normalize_agent(name)
+            if normalized is None:
+                from ..constants import VALID_AGENT_VALUES
+
+                await interaction.followup.send(
+                    f"Unknown agent `{name}`. Valid: {', '.join(sorted(VALID_AGENT_VALUES))}",
+                    ephemeral=True,
+                )
+                return
+
+            from ..constants import DEFAULT_AGENT_MODELS
+
+            def apply(record: Any) -> None:
+                record.agent = normalized
+                record.model = DEFAULT_AGENT_MODELS.get(normalized)
+                record.codex_thread_id = None
+                record.reasoning_effort = None
+                record.updated_at = now_iso()
+
+            await self._store.update_topic_field(topic_key, apply)
             await interaction.followup.send(
-                "Current agent: (use `/agent <name>` to change)", ephemeral=True
+                f"Agent set to `{normalized}`. Thread reset.", ephemeral=True
+            )
+        else:
+            record = await self._store.get_topic(topic_key)
+            from ..constants import DEFAULT_AGENT
+
+            current = (record.agent if record else None) or DEFAULT_AGENT
+            await interaction.followup.send(
+                f"Current agent: `{current}`. Use `/agent <name>` to change.",
+                ephemeral=True,
             )
 
     async def _handle_slash_approvals(
         self, interaction: Any, mode: Optional[str]
     ) -> None:
         await interaction.response.defer(ephemeral=True)
-        if mode:
-            from ..state import normalize_approval_mode
 
-            normalized = normalize_approval_mode(mode)
+        guild_id = interaction.guild_id
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread):
+            channel_id = channel.parent_id
+            thread_id = channel.id
+        else:
+            channel_id = channel.id
+            thread_id = None
+
+        from ..helpers import build_topic_key
+
+        topic_key = build_topic_key(guild_id, channel_id, thread_id)
+
+        if mode:
+            from ..constants import APPROVAL_POLICY_VALUES, APPROVAL_PRESETS
+
+            mode_lower = mode.strip().lower()
+
+            # Check if it's a preset
+            if mode_lower in APPROVAL_PRESETS:
+                ap, sp = APPROVAL_PRESETS[mode_lower]
+
+                def apply_preset(record: Any) -> None:
+                    record.approval_policy = ap
+                    record.sandbox_policy = sp
+                    record.updated_at = now_iso()
+
+                await self._store.update_topic_field(topic_key, apply_preset)
+                await interaction.followup.send(
+                    f"Approval preset `{mode_lower}` applied "
+                    f"(approval={ap}, sandbox={sp}).",
+                    ephemeral=True,
+                )
+                return
+
+            # Check if it's a mode (safe/yolo)
+            from ..state import APPROVAL_MODES
+
+            if mode_lower in APPROVAL_MODES:
+                normalized = mode_lower
+
+                def apply_mode(record: Any) -> None:
+                    record.approval_mode = normalized
+                    record.approval_policy = None
+                    record.sandbox_policy = None
+                    record.updated_at = now_iso()
+
+                await self._store.update_topic_field(topic_key, apply_mode)
+                await interaction.followup.send(
+                    f"Approval mode set to `{normalized}`.", ephemeral=True
+                )
+                return
+
+            # Check if it's a direct policy value
+            if mode_lower in APPROVAL_POLICY_VALUES:
+
+                def apply_policy(record: Any) -> None:
+                    record.approval_policy = mode_lower
+                    record.updated_at = now_iso()
+
+                await self._store.update_topic_field(topic_key, apply_policy)
+                await interaction.followup.send(
+                    f"Approval policy set to `{mode_lower}`.", ephemeral=True
+                )
+                return
+
             await interaction.followup.send(
-                f"Approval mode set to `{normalized}`.", ephemeral=True
+                f"Unknown mode `{mode}`. Use: safe, yolo, "
+                f"{', '.join(sorted(APPROVAL_PRESETS))}",
+                ephemeral=True,
             )
         else:
+            record = await self._store.get_topic(topic_key)
+            current_mode = record.approval_mode if record else "yolo"
+            ap = record.approval_policy if record else None
+            sp = record.sandbox_policy if record else None
+            parts = [f"Mode: `{current_mode}`"]
+            if ap:
+                parts.append(f"approval_policy: `{ap}`")
+            if sp:
+                parts.append(f"sandbox_policy: `{sp}`")
             await interaction.followup.send(
-                "Current approval mode: (use `/approvals <mode>` to change)",
+                " | ".join(parts) + "\nUse `/approvals <mode>` to change.",
                 ephemeral=True,
             )
 
