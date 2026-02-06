@@ -2,44 +2,90 @@
 
 ## Context
 
-The Discord bot currently treats Discord as a simple chat interface — users manually `/bind` channels, manually create threads, and get a single notification channel. Discord offers much richer primitives (categories, forums, threads, roles, webhooks, presence) that map naturally onto agent swarm concepts. This plan transforms the Discord integration into a full swarm control surface where the server structure *is* the swarm topology.
+The Discord bot currently treats Discord as a thin chat surface: users manually
+`/bind` channels, manually create threads, and rely on a single notification
+channel. Discord already provides the primitives we want for a swarm control
+surface (categories, forum channels, threads, roles/permissions, persistent UI
+components, webhooks, presence, searchable history, and a strong mobile app).
+
+This plan turns the Discord server structure into the swarm topology. The goal
+is that a Discord guild is not just “where messages happen”, but the primary,
+operational UI for steering workspaces, tasks, approvals, and coordination.
+
+## Key Decisions
+
+- **Tasks are forum-backed**: each workspace has a `tasks` **Forum channel** and
+  each task is a **forum post/thread** with tags.
+- **Urgent events ping a role**: approval requests and turn failures/timeouts can
+  ping an `alert_role_id`, with dedupe + rate limiting.
+- **All tasks are public**: no private/sensitive task mode in this surface.
+
+## Mental Model (Discord Primitive -> Swarm Concept)
+
+- Category -> Workspace namespace
+- Forum channel (`tasks`) -> Workspace task backlog (triage-friendly, mobile-friendly)
+- Forum thread -> One task execution context (`topic_key`)
+- Forum tags -> Task state + priority (`running`, `needs-approval`, `p0`, etc.)
+- Text channels (`activity-feed`, `approvals`) -> Per-workspace observability + approvals
+- Control plane category -> Cross-workspace dashboard + bus + notifications
+- Webhooks -> Multi-identity posting (PMA/Codex/System)
+- Persistent Views (buttons/selects/modals) -> Actionable UI without leaving Discord
 
 ## Overview
 
-7 features across 4 new mixins, 3 new SQLite tables, and modifications to ~10 existing files.
+11 features across 5 new mixins, 6 new SQLite tables, and modifications to ~15
+existing files under `integrations/discord/`.
 
 ---
 
 ## 1. Server Scaffolding (`/setup`)
 
-**What**: A `/setup` command that auto-creates a Discord server structure mirroring the hub's workspaces.
+**What**: A `/setup` command that creates a Discord server structure mirroring
+the hub's workspaces, plus the forum tags needed for task triage.
 
 **Target structure**:
 ```
 [Category: frontend-app]
-  #tasks           -- Bound to workspace. Users /run here. Auto-threaded.
-  #activity-feed   -- Read-only. Rich embeds for every agent action.
-  #approvals       -- Approval requests with buttons.
+  tasks            (Forum)   -- Bound to workspace. /run creates a post/thread.
+  #activity-feed             -- Read-only. Rich embeds for every agent action.
+  #approvals                 -- Approval requests with buttons (+ optional role ping).
 
 [Category: backend-api]
-  #tasks
+  tasks (Forum)
   #activity-feed
   #approvals
 
 [Category: Control Plane]
-  #dashboard       -- Pinned embed: real-time workspace status grid.
-  #agent-bus       -- PMA decisions, cross-workspace handoffs, lifecycle.
-  #notifications   -- General lifecycle events.
+  #dashboard                 -- Pinned embed: real-time workspace status grid.
+  #agent-bus                 -- PMA decisions, cross-workspace handoffs, lifecycle.
+  #notifications             -- General lifecycle events.
 ```
 
-**New config** in `config.py`:
+**New config** in `integrations/discord/config.py`:
 ```python
 @dataclass(frozen=True)
 class DiscordScaffoldConfig:
     enabled: bool = False
     auto_bind: bool = True
     category_prefix: str = ""
-    task_channel_name: str = "tasks"
+
+    # Default: Forum, not text+threads.
+    tasks_channel_kind: str = "forum"  # "forum" | "text"
+    tasks_channel_name: str = "tasks"
+    task_forum_tags: tuple[str, ...] = (
+        "queued",
+        "running",
+        "needs-approval",
+        "blocked",
+        "done",
+        "failed",
+        "timeout",
+        "stopped",
+        "p0",
+        "p1",
+        "p2",
+    )
+
     activity_channel_name: str = "activity-feed"
     approval_channel_name: str = "approvals"
     dashboard_channel_name: str = "dashboard"
@@ -59,76 +105,158 @@ CREATE TABLE IF NOT EXISTS discord_scaffolded_channels (
 )
 ```
 
-**Idempotency**: Before creating, check table + verify channel still exists via `bot.fetch_channel()`. If manually deleted, recreate. If category with same name exists, reuse it.
+**New state table** `discord_forum_tags`:
+```sql
+CREATE TABLE IF NOT EXISTS discord_forum_tags (
+    guild_id INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL,
+    forum_channel_id INTEGER NOT NULL,
+    tag_name TEXT NOT NULL,
+    tag_id INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, workspace_id, tag_name)
+)
+```
 
-**Implementation**: New mixin `ScaffoldCommands` in `handlers/commands/scaffold.py`.
+**Idempotency**:
+- Before creating: consult `discord_scaffolded_channels` + verify channel exists via
+  `bot.fetch_channel()`.
+- If manually deleted: recreate and update state.
+- If forum tags drift: ensure required tags exist; recreate missing tags and update
+  `discord_forum_tags`.
+
+**Permissions (channel overwrites)**:
+- `#activity-feed`, `#dashboard`, `#agent-bus`: `send_messages=False` for `@everyone`,
+  `send_messages=True` for the bot.
+- `tasks` forum: deny task creation for read-only roles by denying `send_messages`.
+  Threads inherit permissions from the parent forum channel.
+
+**Implementation**: New command mixin `ScaffoldCommands` in
+`integrations/discord/handlers/commands/scaffold.py`.
 
 **Files**:
 | File | Action |
 |------|--------|
-| `handlers/commands/scaffold.py` | **Create** — `ScaffoldCommands` mixin |
-| `config.py` | Modify — add `DiscordScaffoldConfig`, parse from `scaffold` key |
-| `state.py` | Modify — add table + CRUD methods |
-| `commands_runtime.py` | Modify — register `/setup` command |
-| `service.py:102-114` | Modify — add `ScaffoldCommands` to mixin list |
-| `rendering.py` | Modify — add `build_setup_summary_embed()` |
+| `integrations/discord/handlers/commands/scaffold.py` | **Create** — `ScaffoldCommands` mixin (`/setup`) |
+| `integrations/discord/config.py` | Modify — add `DiscordScaffoldConfig` under `discord_bot.scaffold` |
+| `integrations/discord/state.py` | Modify — add `discord_scaffolded_channels`, `discord_forum_tags` + CRUD |
+| `integrations/discord/handlers/commands_runtime.py` | Modify — register `/setup` command |
+| `integrations/discord/service.py` | Modify — add `ScaffoldCommands` to mixin list |
+| `integrations/discord/rendering.py` | Modify — add `build_setup_summary_embed()` |
 
 ---
 
-## 2. Thread-Per-Task (Auto-Threading)
+## 2. Forum-Backed Tasks (Task-Per-Thread)
 
-**What**: Every `/run` and every mention-triggered turn auto-creates a Discord thread. The thread becomes the isolated execution context.
+**What**: Every task is a forum post/thread in the workspace’s `tasks` forum.
+The thread is the isolated execution context (`topic_key`).
 
-**Thread naming**: `task-{prompt[:80]}` sanitized (remove newlines, special chars). Discord limit: 100 chars. Fallback: `task-{timestamp}`.
+**Primary entrypoints**:
+- `/run` inside a workspace `tasks` forum (canonical)
+- Mention-triggered messages in other bound channels may **create a task post**
+  in the workspace `tasks` forum and reply with a link (optional but recommended
+  to make “start a task from anywhere” work without scattering contexts).
 
-**Changes to `_cmd_run_impl()`** (`execution.py:216`):
+**Thread naming**: `task-{prompt[:80]}` sanitized. Discord limit: 100 chars.
+Fallback: `task-{timestamp}`.
 
-Current flow creates a topic in-place. New flow:
-1. After checking binding (line 241), create a Discord thread:
-   ```python
-   parent = bot.get_channel(channel_id)
-   thread_result = await parent.create_thread(
-       name=sanitize_thread_name(prompt),
-       auto_archive_duration=1440,  # 24h
-   )
-   thread = thread_result.thread
-   ```
-2. Build topic_key with `thread.id` as the thread_id
-3. Send the followup into the thread (not parent channel)
-4. Spawn `_execute_turn()` with the thread context
+**Creation flow** (forum):
+1. Resolve workspace from the current context (bindings/scaffold table).
+2. Resolve the workspace `tasks` forum channel id from `discord_scaffolded_channels`.
+3. Create a forum thread using `ForumChannel.create_thread(...)` with a starter
+   **Task Card** embed and initial tag `queued`.
+4. Build `topic_key` using `(guild_id, tasks_forum_channel_id, thread.id)`.
+5. Execute the turn in the thread context (send placeholder/progress in-thread).
+
+**State transitions (tags)**:
+- `queued` -> `running` when execution starts
+- `running` -> `done` on success
+- `running` -> `failed` on error
+- `running` -> `timeout` on timeout
+- Any -> `stopped` on `/stop`
+- Any -> `needs-approval` when an approval request is emitted (sticky until resolved)
 
 **Thread lifecycle**:
-- On completion: edit thread name to prefix status icon (checkmark/X)
-- `auto_archive_duration=1440` handles cleanup (Discord archives after 24h inactivity)
-- On `/stop`: prefix thread name with "stopped-"
+- Prefer tags as the primary state signal.
+- Keep the existing thread rename prefixing as a secondary signal (optional).
 
-**Changes to `_execute_turn()`** (`execution.py:31`):
-- After step 12 (turn completed), rename thread: `await thread.edit(name=f"done-{original_name[:95]}")`
-- In error/timeout handlers, rename to `fail-{name}` or `timeout-{name}`
-
-**Changes to message handler** (`messages.py`):
-- When a mention triggers in a non-thread context (parent `#tasks` channel), create thread before dispatching
+**New state table** `discord_tasks`:
+```sql
+CREATE TABLE IF NOT EXISTS discord_tasks (
+    guild_id INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL,
+    forum_channel_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL,
+    root_message_id INTEGER NOT NULL,  -- Task Card (starter message)
+    created_by_user_id INTEGER,
+    initial_prompt TEXT,
+    created_at TEXT NOT NULL,
+    last_state TEXT,
+    last_state_at TEXT,
+    last_activity_message_id INTEGER,
+    PRIMARY KEY (guild_id, thread_id)
+)
+```
 
 **Files**:
 | File | Action |
 |------|--------|
-| `handlers/commands/execution.py` | Modify — auto-create thread in `_cmd_run_impl`, rename on completion in `_execute_turn` |
-| `handlers/messages.py` | Modify — auto-thread for mention-triggered turns |
-| `helpers.py` | Modify — add `sanitize_thread_name(prompt) -> str` |
-| `constants.py` | Modify — add `THREAD_NAME_MAX_LEN = 100` |
-| `state.py` | Modify — add `list_topics_for_channel()` method |
+| `integrations/discord/handlers/commands/execution.py` | Modify — `/run` creates forum task threads and routes execution there |
+| `integrations/discord/handlers/messages.py` | Modify — (optional) mention-trigger creates forum task thread + replies with link |
+| `integrations/discord/helpers.py` | Modify — add `sanitize_thread_name(prompt) -> str` and helpers to resolve `tasks` forum |
+| `integrations/discord/constants.py` | Modify — add `THREAD_NAME_MAX_LEN = 100` (if not already present) |
+| `integrations/discord/state.py` | Modify — add `discord_tasks` + helpers for task lookup/listing |
 
 ---
 
-## 3. Role-Based Access Control (RBAC)
+## 3. Task Card + Persistent Controls
 
-**What**: Map Discord roles to permission tiers that control command access and approval modes.
+**What**: The starter message in every forum task thread is a “Task Card” embed
+that acts as the stable UI surface for that task (updated throughout execution).
+
+**Task Card embed** (starter message requirements also satisfy forum create_thread):
+- Workspace name + path (or id)
+- Initiator (Discord user)
+- Effective approval mode + sandbox policy
+- Status (mirrors tags)
+- Timestamps: created / last update / finished
+- Jump links:
+  - latest agent response (or progress message)
+  - latest activity feed entry (optional)
+
+**Task Card controls** (persistent `View`, mobile-friendly):
+- `Stop` -> triggers existing interrupt
+- `Set approvals` -> select/modal to set safe/yolo (and/or full preset set)
+- `Rerun` -> re-runs `initial_prompt` in the same workspace context (uses current model/agent/topic settings)
+- `Escalate (p0)` -> applies `p0` tag and pings `alert_role_id` (cooldown enforced)
+
+**Persistence**:
+- Store `root_message_id` in `discord_tasks`.
+- Re-register persistent views in `on_ready()` using `bot.add_view(...)` so buttons
+  survive restarts.
+
+**Files**:
+| File | Action |
+|------|--------|
+| `integrations/discord/handlers/tasks.py` | **Create** — `DiscordTasksMixin` (task card render + button callbacks) |
+| `integrations/discord/handlers/callbacks.py` | Modify — route `task:*` custom_ids to `DiscordTasksMixin` |
+| `integrations/discord/rendering.py` | Modify — add `build_task_card_embed()` |
+| `integrations/discord/service.py` | Modify — add mixin + re-register persistent task views on ready |
+
+---
+
+## 4. Role-Based Access Control (RBAC) + Native Command Permissions
+
+**What**: Map Discord roles to permission tiers that control command access and
+approval modes. Enforce in code, and use Discord’s app command permission defaults
+as defense-in-depth (better UX and fewer accidents).
 
 **New config**:
 ```yaml
 discord_bot:
   rbac:
     enabled: true
+    use_default_member_permissions: true
     tiers:
       - name: admin
         role_ids: [123456789]
@@ -149,82 +277,52 @@ discord_bot:
     default_tier: viewer
 ```
 
-**Config dataclasses** in `config.py`:
-```python
-@dataclass(frozen=True)
-class DiscordRoleTier:
-    name: str
-    role_ids: set[int]
-    approval_mode: str = "safe"
-    can_run: bool = True
-    can_setup: bool = False
-    can_bind: bool = True
-    can_stop: bool = True
-    read_only: bool = False
+**Enforcement**:
+- Allowlist remains first-pass gate (guild/channel/role/user dimensions).
+- RBAC is second-pass: per-command capability control within allowed contexts.
+- Approval mode resolution: topic override > RBAC tier > config default.
 
-@dataclass(frozen=True)
-class DiscordRBACConfig:
-    enabled: bool = False
-    tiers: list[DiscordRoleTier] = field(default_factory=list)
-    default_tier: str = "viewer"
-```
-
-**Enforcement**: New mixin `DiscordRBACMixin` in `handlers/rbac.py` provides:
-- `_resolve_user_tier(member) -> DiscordRoleTier` — first matching tier by role
-- `_enforce_permission(interaction, perm: str) -> bool` — check + ephemeral denial
-
-Added at the top of each command handler (`_handle_slash_run` checks `can_run`, etc.).
-
-**Interaction with allowlist**: Allowlist remains the first-pass gate (guild/channel access). RBAC is second-pass (capability control within allowed contexts).
-
-**Approval mode resolution priority**: explicit topic override > RBAC tier > config default.
-
-**Channel permission overwrites**: When `/setup` creates channels, apply Discord permission overwrites:
-- `#activity-feed`, `#dashboard`, `#agent-bus`: `send_messages=False` for `@everyone`, `send_messages=True` for bot
-- `#tasks`: `send_messages=False` for viewer-tier roles
+**Native command permissions**:
+- Register `/setup` with a restrictive `default_member_permissions` (admin-ish).
+- Keep RBAC checks authoritative (Discord defaults are not a security boundary).
 
 **Files**:
 | File | Action |
 |------|--------|
-| `handlers/rbac.py` | **Create** — `DiscordRBACMixin` |
-| `config.py` | Modify — add `DiscordRBACConfig`, `DiscordRoleTier` |
-| `service.py:102-114` | Modify — add mixin |
-| `commands_runtime.py` | Modify — permission checks in each handler |
-| `handlers/commands/execution.py` | Modify — pass user tier to policy resolution |
-| `handlers/commands/scaffold.py` | Modify — apply permission overwrites on creation |
+| `integrations/discord/handlers/rbac.py` | **Create** — `DiscordRBACMixin` |
+| `integrations/discord/config.py` | Modify — add `DiscordRBACConfig`, `DiscordRoleTier` |
+| `integrations/discord/service.py` | Modify — add mixin |
+| `integrations/discord/handlers/commands_runtime.py` | Modify — permission checks and set `default_member_permissions` where relevant |
 
 ---
 
-## 4. Agent Communication Bus
+## 5. Agent Communication Bus
 
-**What**: A `#agent-bus` channel showing all cross-agent coordination as structured embeds, with webhook-per-agent for distinct identities.
+**What**: A `#agent-bus` channel showing all cross-agent coordination as
+structured embeds, with webhook-per-agent for distinct identities.
 
-### 4a. Lifecycle Event Bridge
+### 5a. Lifecycle Event Bridge
 
-Register a listener with `LifecycleEventEmitter` (in `core/lifecycle_events.py`) during `on_ready`:
-```python
-lifecycle_emitter.add_listener(lambda event:
-    asyncio.run_coroutine_threadsafe(
-        self._post_to_agent_bus(event), self._bot.bot.loop
-    )
-)
-```
+Register a listener with `LifecycleEventEmitter` (in `core/lifecycle_events.py`)
+during `on_ready` and bridge into the bot event loop with
+`asyncio.run_coroutine_threadsafe(...)`.
 
-Route events to `#agent-bus` as color-coded embeds.
+### 5b. PMA Decision Posting
 
-### 4b. PMA Decision Posting
+`LifecycleEventType.DISPATCH_CREATED` events already fire when PMA creates
+dispatches. The listener posts structured embeds showing source workspace, target,
+decision summary, and action items.
 
-`LifecycleEventType.DISPATCH_CREATED` events already fire when PMA creates dispatches. The listener catches these and posts structured embeds showing source workspace, target, decision summary, and action items.
+### 5c. Cross-Workspace Handoff Signals
 
-### 4c. Cross-Workspace Handoff Signals
-
-When PMA routes a task from workspace A to workspace B (via `_enqueue_pma_for_lifecycle_event` in `hub.py`), post a handoff embed:
+When PMA routes a task from workspace A to workspace B (via
+`_enqueue_pma_for_lifecycle_event` in `hub.py`), post a handoff embed:
 ```
 [Handoff] frontend-app -> backend-api
 "API endpoint needs updating to match new frontend schema"
 ```
 
-### 4d. Webhook-Per-Agent Identity
+### 5d. Webhook-Per-Agent Identity
 
 New state table `discord_agent_webhooks`:
 ```sql
@@ -240,46 +338,28 @@ CREATE TABLE IF NOT EXISTS discord_agent_webhooks (
 ```
 
 Agent identities:
-- **PMA**: "Project Manager" — posts decisions, orchestration moves
-- **Codex**: "Codex Agent" — posts task updates
-- **System**: "Autorunner" — posts lifecycle events
+- **PMA**: "Project Manager" — decisions, orchestration moves
+- **Codex**: "Codex Agent" — task updates
+- **System**: "Autorunner" — lifecycle events
 
 Each posts via its own webhook with distinct name/avatar.
-
-**New config fields** in `DiscordBotConfig`:
-```python
-agent_bus_channel_id: Optional[int] = None
-```
-
-Channel resolution: scaffolded table > explicit config > `default_notification_channel_id`.
 
 **Files**:
 | File | Action |
 |------|--------|
-| `handlers/agent_bus.py` | **Create** — `DiscordAgentBusMixin` |
-| `state.py` | Modify — add `discord_agent_webhooks` table |
-| `config.py` | Modify — add `agent_bus_channel_id` |
-| `rendering.py` | Modify — add `build_bus_lifecycle_embed()`, `build_bus_dispatch_embed()`, `build_bus_handoff_embed()` |
-| `service.py` | Modify — add mixin, register lifecycle listener in startup |
-| `notifications.py` | Modify — route lifecycle events to bus in addition to notification channel |
+| `integrations/discord/handlers/agent_bus.py` | **Create** — `DiscordAgentBusMixin` |
+| `integrations/discord/state.py` | Modify — add `discord_agent_webhooks` |
+| `integrations/discord/config.py` | Modify — add `agent_bus_channel_id` |
+| `integrations/discord/rendering.py` | Modify — add bus embed builders |
+| `integrations/discord/service.py` | Modify — add mixin + register lifecycle listener |
+| `integrations/discord/notifications.py` | Modify — optionally route lifecycle events to bus |
 
 ---
 
-## 5. Live Dashboard
+## 6. Live Dashboard
 
-**What**: A pinned embed in `#dashboard` showing real-time status of all workspaces. Updated on turn start/complete/error.
-
-**Dashboard embed layout**:
-```
-Title: "Agent Swarm Dashboard"
-Description: "Last updated: 2025-01-15 14:30:02 UTC"
-
-Field: "frontend-app" | Idle | 14 turns | Last: 2m ago
-Field: "backend-api"  | Running: fix auth bug | Context: 45%
-Field: "ml-pipeline"  | Error (timeout) | Last: 15m ago
-
-Footer: "3 workspaces | 1 active | 27 turns today"
-```
+**What**: A pinned embed in `#dashboard` showing real-time status of all
+workspaces. Updated on turn start/complete/error and key lifecycle events.
 
 **New state table** `discord_dashboard`:
 ```sql
@@ -292,80 +372,142 @@ CREATE TABLE IF NOT EXISTS discord_dashboard (
 )
 ```
 
-**In-memory tracking**:
+**Files**:
+| File | Action |
+|------|--------|
+| `integrations/discord/handlers/dashboard.py` | **Create** — `DiscordDashboardMixin` |
+| `integrations/discord/state.py` | Modify — add `discord_dashboard` |
+| `integrations/discord/config.py` | Modify — add `dashboard_channel_id` |
+| `integrations/discord/rendering.py` | Modify — add `build_dashboard_embed()` |
+| `integrations/discord/service.py` | Modify — add mixin |
+| `integrations/discord/handlers/commands/execution.py` | Modify — mark dashboard dirty on turn start/complete |
+| `integrations/discord/notifications.py` | Modify — mark dashboard dirty on lifecycle events |
+
+---
+
+## 7. Bot Presence
+
+**What**: Dynamic bot status reflecting swarm activity (e.g., “Watching 2 tasks”).
+
+Called on: turn start, turn complete, and `on_ready`.
+
+**Files**: `integrations/discord/service.py`, `integrations/discord/handlers/commands/execution.py`
+
+---
+
+## 8. Activity Feed
+
+**What**: Per-workspace `#activity-feed` channels with rich embeds for key agent
+actions and app-server events.
+
+**Improvements over the original plan**:
+- Activity entries should link back to the Task Card (`thread.jump_url` and/or the
+  `root_message_id`), so Discord history is navigable.
+- When an activity entry is posted, update the Task Card with a link to “latest
+  activity”.
+
+**Files**: `integrations/discord/notifications.py`, `integrations/discord/rendering.py`
+
+---
+
+## 9. Alerts (Role Ping)
+
+**What**: Optional role pings for urgent events with dedupe + rate limiting.
+
+**New config** in `integrations/discord/config.py`:
 ```python
-_dashboard_dirty: bool = False
-_dashboard_last_edit: float = 0.0  # monotonic, for rate limiting
+@dataclass(frozen=True)
+class DiscordAlertConfig:
+    enabled: bool = True
+    alert_role_id: Optional[int] = None
+    per_task_cooldown_seconds: int = 900
+    global_cooldown_seconds: int = 10
 ```
 
-**Update triggers**: Turn start/complete/error in `_execute_turn()`, lifecycle events in notification handler. Rate-limited to 1 edit per 5 seconds.
+**Trigger events**:
+- `needs-approval` (first request per task, not every update)
+- `failed`, `timeout`
+
+**New state table** `discord_alerts`:
+```sql
+CREATE TABLE IF NOT EXISTS discord_alerts (
+    guild_id INTEGER NOT NULL,
+    thread_id INTEGER NOT NULL,
+    alert_type TEXT NOT NULL,   -- 'needs-approval'|'failed'|'timeout'|'p0'
+    last_sent_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, thread_id, alert_type)
+)
+```
 
 **Files**:
 | File | Action |
 |------|--------|
-| `handlers/dashboard.py` | **Create** — `DiscordDashboardMixin` |
-| `state.py` | Modify — add `discord_dashboard` table |
-| `config.py` | Modify — add `dashboard_channel_id: Optional[int]` |
-| `rendering.py` | Modify — add `build_dashboard_embed()` |
-| `service.py` | Modify — add mixin |
-| `execution.py` | Modify — call `_mark_dashboard_dirty()` on turn start/complete |
-| `notifications.py` | Modify — call `_mark_dashboard_dirty()` on lifecycle events |
-| `constants.py` | Modify — add `DASHBOARD_MIN_EDIT_INTERVAL = 5.0` |
+| `integrations/discord/config.py` | Modify — add `DiscordAlertConfig` under `discord_bot.alerts` |
+| `integrations/discord/state.py` | Modify — add `discord_alerts` |
+| `integrations/discord/notifications.py` | Modify — send pings on transitions (deduped) |
 
 ---
 
-## 6. Bot Presence
+## 10. Triage + Navigation Commands
 
-**What**: Dynamic bot status reflecting swarm activity.
+**What**: Discord-native navigation so the swarm is operable from mobile without
+scrolling and searching.
 
-In `service.py`, add `_update_presence()`:
-```python
-async def _update_presence(self) -> None:
-    active = len(self._turn_contexts)
-    if active > 0:
-        name = f"{active} task{'s' if active != 1 else ''}"
-        activity = discord.Activity(type=discord.ActivityType.watching, name=name)
-    else:
-        activity = discord.Activity(type=discord.ActivityType.watching, name="for tasks")
-    await self._bot.bot.change_presence(activity=activity)
-```
+**New commands**:
+- `/workspaces`: embed list of workspaces with links/buttons to each workspace’s
+  `tasks`, `activity-feed`, and `approvals`.
+- `/tasks list [workspace] [tag]`: show tasks filtered by tag/state (backed by SQLite).
+- `/tasks mine`: show tasks created by the caller.
 
-Called on: turn start, turn complete (in `_execute_turn` finally block), and `on_ready`.
+**Implementation note**: do not scan Discord history for these; use `discord_tasks`
+and (forum) tag state persisted in SQLite for fast, deterministic listings.
 
-**Files**: `service.py`, `execution.py` (2 call sites).
+**Files**:
+| File | Action |
+|------|--------|
+| `integrations/discord/handlers/commands_runtime.py` | Modify — register new commands |
+| `integrations/discord/handlers/commands_spec.py` | Modify — add specs for help/registration |
+| `integrations/discord/handlers/tasks.py` | Modify — implement listing + workspace link rendering |
+| `integrations/discord/rendering.py` | Modify — add `build_workspaces_embed()`, `build_tasks_list_embed()` |
 
 ---
 
-## 7. Activity Feed
+## 11. Reconciliation / Self-Healing
 
-**What**: Per-workspace `#activity-feed` channels with rich embeds for every agent action.
+**What**: On `on_ready()`, reconcile Discord state against persisted state and
+ensure the control surface stays intact after manual changes or partial failures.
 
-Extend `DiscordNotificationHandlers` (`notifications.py`). At the bottom of each `_note_progress_*` method, additionally post to the activity feed:
+**Reconcile responsibilities**:
+- Scaffolded channels exist (recreate if missing).
+- Forum tags exist on each `tasks` forum (recreate if missing).
+- Dashboard pinned message exists (recreate if missing).
+- Persistent views are re-registered (approvals + task cards).
 
-| App-server event | Activity embed |
-|-----------------|----------------|
-| `item/commandExecution/requestApproval` | Yellow "Approval Requested" |
-| `item/completed` (command) | Green "Command Executed" + output snippet |
-| `item/completed` (file change) | Blue "Files Changed" + file list |
-| `turn/completed` | Green "Turn Completed" / Red "Turn Failed" |
-| `error` | Red "Error" |
+**Observability**:
+- Emit structured log events:
+  - `discord.reconcile.channel_recreated`
+  - `discord.reconcile.tag_recreated`
+  - `discord.reconcile.dashboard_recreated`
 
-Channel resolution: look up `activity` channel from `discord_scaffolded_channels` for the workspace. Fall back to thread parent.
-
-**Files**: `notifications.py`, `rendering.py` (add `build_activity_embed()` variants).
+**Files**:
+| File | Action |
+|------|--------|
+| `integrations/discord/service.py` | Modify — run reconcile pass in `on_ready()` |
+| `integrations/discord/state.py` | Modify — helpers to enumerate scaffold + tasks |
 
 ---
 
 ## New Mixin Summary
 
-| Mixin | File | Added to `service.py` |
-|-------|------|-----------------------|
-| `ScaffoldCommands` | `handlers/commands/scaffold.py` | Yes |
-| `DiscordRBACMixin` | `handlers/rbac.py` | Yes |
-| `DiscordAgentBusMixin` | `handlers/agent_bus.py` | Yes |
-| `DiscordDashboardMixin` | `handlers/dashboard.py` | Yes |
+| Mixin | File | Added to `integrations/discord/service.py` |
+|-------|------|--------------------------------------------|
+| `ScaffoldCommands` | `integrations/discord/handlers/commands/scaffold.py` | Yes |
+| `DiscordRBACMixin` | `integrations/discord/handlers/rbac.py` | Yes |
+| `DiscordAgentBusMixin` | `integrations/discord/handlers/agent_bus.py` | Yes |
+| `DiscordDashboardMixin` | `integrations/discord/handlers/dashboard.py` | Yes |
+| `DiscordTasksMixin` | `integrations/discord/handlers/tasks.py` | Yes |
 
-Updated mixin list in `service.py:102`:
+Updated mixin list in `integrations/discord/service.py`:
 ```python
 class DiscordBotService(
     DiscordRuntimeHelpers,
@@ -383,6 +525,7 @@ class DiscordBotService(
     DiscordRBACMixin,          # NEW
     DiscordAgentBusMixin,      # NEW
     DiscordDashboardMixin,     # NEW
+    DiscordTasksMixin,         # NEW
 ):
 ```
 
@@ -390,10 +533,16 @@ class DiscordBotService(
 
 ## State Schema Migration
 
-Bump `DISCORD_SCHEMA_VERSION` from 1 to 2 in `state.py:25`. Add migration in `_ensure_schema()`:
-- Check current version
-- If v1: CREATE the 3 new tables, UPDATE version to 2
-- All new tables use `IF NOT EXISTS` for safety
+Bump `DISCORD_SCHEMA_VERSION` from 1 to 2 in `integrations/discord/state.py`.
+Migration creates (if missing) all new tables:
+- `discord_scaffolded_channels`
+- `discord_forum_tags`
+- `discord_tasks`
+- `discord_alerts`
+- `discord_agent_webhooks`
+- `discord_dashboard`
+
+All new tables use `IF NOT EXISTS` for safety. Reconcile logic handles drift.
 
 ---
 
@@ -401,13 +550,17 @@ Bump `DISCORD_SCHEMA_VERSION` from 1 to 2 in `state.py:25`. Add migration in `_e
 
 | Phase | Feature | Key files |
 |-------|---------|-----------|
-| 1 | Config + State schema | `config.py`, `state.py`, `constants.py` |
-| 2 | RBAC mixin | `handlers/rbac.py`, `config.py`, `service.py` |
-| 3 | Thread-per-task | `execution.py`, `messages.py`, `helpers.py` |
-| 4 | Server scaffolding | `handlers/commands/scaffold.py`, `commands_runtime.py` |
-| 5 | Dashboard + Presence | `handlers/dashboard.py`, `rendering.py`, `service.py` |
-| 6 | Agent bus | `handlers/agent_bus.py`, `state.py`, `rendering.py` |
-| 7 | Activity feed | `notifications.py`, `rendering.py` |
+| 1 | Config + State schema | `integrations/discord/config.py`, `integrations/discord/state.py`, `integrations/discord/constants.py` |
+| 2 | Scaffold + forum tags | `integrations/discord/handlers/commands/scaffold.py`, `integrations/discord/state.py` |
+| 3 | Forum-backed task creation | `integrations/discord/handlers/commands/execution.py`, `integrations/discord/helpers.py` |
+| 4 | Task cards + controls | `integrations/discord/handlers/tasks.py`, `integrations/discord/handlers/callbacks.py`, `integrations/discord/rendering.py` |
+| 5 | RBAC + native command perms | `integrations/discord/handlers/rbac.py`, `integrations/discord/handlers/commands_runtime.py` |
+| 6 | Dashboard + presence | `integrations/discord/handlers/dashboard.py`, `integrations/discord/service.py` |
+| 7 | Agent bus | `integrations/discord/handlers/agent_bus.py`, `integrations/discord/notifications.py` |
+| 8 | Activity feed links | `integrations/discord/notifications.py`, `integrations/discord/rendering.py` |
+| 9 | Alerts | `integrations/discord/notifications.py`, `integrations/discord/state.py` |
+| 10 | Triage commands | `integrations/discord/handlers/commands_runtime.py`, `integrations/discord/handlers/tasks.py` |
+| 11 | Reconcile pass | `integrations/discord/service.py`, `integrations/discord/state.py` |
 
 ---
 
@@ -415,24 +568,23 @@ Bump `DISCORD_SCHEMA_VERSION` from 1 to 2 in `state.py:25`. Add migration in `_e
 
 | Risk | Mitigation |
 |------|-----------|
-| Channel creation rate limit (~10/10min) | Batch with delays in `/setup`, `asyncio.sleep(1)` between creates |
-| Thread limit (1000 active/guild) | `auto_archive_duration=1440` ensures cleanup; completed threads archive |
-| Webhook limit (15/channel) | Share webhooks; 3 agent identities is well under limit |
-| Embed size (25 fields, 6000 chars) | Compact 1-line format for >15 workspaces; paginate if >25 |
-| Lifecycle listener thread safety | Use `asyncio.run_coroutine_threadsafe()` to bridge to bot event loop |
+| Channel creation rate limit (~10/10min) | Batch creates in `/setup` with small sleeps; be resilient via reconcile |
+| Forum starter message requirement | Always create thread with Task Card embed as the starter |
+| Webhook limit (15/channel) | Share webhooks; 3 identities well under limit |
+| Embed size limits | Keep Task Card compact; move long content to thread messages or attachments |
+| Edit rate limits (~5 edits/5s per channel) | Existing progress stream throttling; also throttle Task Card updates |
+| Role ping noise | Dedupe per task + global cooldown; disable if `alert_role_id` unset |
 
 ---
 
 ## Verification
 
-1. **Unit**: Run existing test suite to confirm no regressions
-2. **Schema**: Start bot, verify SQLite has 3 new tables with correct schema
-3. **`/setup`**: Run in test guild, verify categories + channels created, bindings set
-4. **`/setup` idempotency**: Run again, verify no duplicates
-5. **`/run` auto-thread**: Run a task, verify new thread created with correct name
-6. **Thread lifecycle**: Verify thread renamed on completion/error
-7. **RBAC**: Test with admin/dev/viewer roles, verify command access + denial messages
-8. **Dashboard**: Verify pinned embed updates on turn start/complete
-9. **Presence**: Verify bot status changes ("Watching 1 task" -> "Watching for tasks")
-10. **Agent bus**: Trigger a lifecycle event, verify embed in `#agent-bus`
-11. **Activity feed**: Run a task, verify action embeds in `#activity-feed`
+1. **Schema**: Start bot, verify SQLite contains all new tables with correct schema.
+2. **`/setup`**: Run in test guild, verify categories + forum/task channels + tag set.
+3. **`/setup` idempotency**: Run again, verify no duplicates; delete one tag and rerun to recreate.
+4. **Forum `/run`**: Run a task in `tasks` forum; verify a forum post/thread created with Task Card.
+5. **Tag transitions**: Verify `queued -> running -> done/failed/timeout` tags apply correctly.
+6. **Approvals**: Trigger approval; verify tag `needs-approval` and ping behavior (deduped).
+7. **Task controls**: Stop/Set approvals/Rerun/Escalate buttons work; survive restart.
+8. **Triage commands**: `/tasks list` filters correctly without scanning history.
+9. **Reconcile**: Delete a scaffolded channel or dashboard message, restart bot, verify it is restored and logged.
