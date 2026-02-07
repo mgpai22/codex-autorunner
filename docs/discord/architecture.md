@@ -17,7 +17,8 @@ notifications).
 | Slash commands over prefix | Discord is deprecating prefix commands for verified bots; slash commands offer auto-complete, type validation, and discoverability |
 | Embeds for structured output | Rich embeds (4096-char description, color-coded, fields) for status/progress; plain text for agent responses |
 | Thread per task | Discord threads mirror Telegram forum topics: isolation, notification control, archival |
-| Mixin composition | `DiscordBotService` composes 11 mixin classes for separation of concerns |
+| Forum-backed tasks | Each task is a forum post/thread with tags for state — see `docs/discord/swarm-surface.md` |
+| Mixin composition | `DiscordBotService` composes 16 mixin classes for separation of concerns |
 
 ## Architecture layers
 
@@ -93,10 +94,15 @@ integrations/discord/
     messages.py            # Free-text message handling, coalescing
     questions.py           # DiscordQuestionHandlers mixin (select + modal)
     selections.py          # Paginated selection menus
+    agent_bus.py           # DiscordAgentBusMixin (lifecycle + coordination bus)
+    dashboard.py           # DiscordDashboardMixin (pinned dashboard embed)
+    rbac.py                # DiscordRBACMixin (role-based access control)
+    tasks.py               # DiscordTasksMixin (forum task cards + triage commands)
     commands/
       __init__.py          # Exports all command mixins
       execution.py         # /run, /stop, /new command implementations
       formatting.py        # FormattingHelpers mixin (consistent embed styling)
+      scaffold.py          # ScaffoldCommands mixin (/setup implementation)
       shared.py            # SharedHelpers mixin (turn resolution, interrupt)
       workspace.py         # /bind, /status command implementations
     commands_runtime.py    # DiscordCommandHandlers mixin (CommandTree registration)
@@ -105,7 +111,7 @@ integrations/discord/
 
 ## Service composition
 
-`DiscordBotService` inherits from 11 mixin classes:
+`DiscordBotService` inherits from 16 mixin classes:
 
 ```python
 class DiscordBotService(
@@ -120,11 +126,17 @@ class DiscordBotService(
     ExecutionCommands,            # /run, /stop, /new implementations
     WorkspaceCommands,            # /bind, /status implementations
     FormattingHelpers,            # Embed formatting utilities
+    ScaffoldCommands,             # /setup scaffolding for swarm control surface
+    DiscordRBACMixin,             # Role-based access control
+    DiscordAgentBusMixin,         # Lifecycle/coordination event bus posting
+    DiscordDashboardMixin,        # Pinned dashboard embed maintenance
+    DiscordTasksMixin,            # Forum-backed task cards and triage commands
 ):
 ```
 
 This mirrors the Telegram integration's mixin pattern but with Discord-specific
-handler implementations.
+handler implementations. See `docs/discord/swarm-surface.md` for details on the
+last 5 mixins (swarm control surface).
 
 ## Runtime flow
 
@@ -144,15 +156,23 @@ handler implementations.
 ## State and persistence
 
 Per-guild/channel/thread state is stored in `.codex-autorunner/discord_state.sqlite3`
-with tables:
+(schema version 2) with tables:
 
 - `discord_meta`: schema version, timestamps
 - `discord_topics`: workspace binding, active thread ID, approval mode per topic
 - `discord_channel_bindings`: static channel-to-workspace mappings
 - `discord_pending_approvals`: approval requests that survive restarts
 - `discord_outbox`: messages queued for delivery with retry state
+- `discord_scaffolded_channels`: channels created by `/setup` (guild, workspace, type → channel_id)
+- `discord_forum_tags`: forum tag name → Discord tag ID mappings
+- `discord_tasks`: per-task state (thread_id, state, prompt, root_message_id)
+- `discord_alerts`: alert deduplication (last_sent_at per task+type)
+- `discord_agent_webhooks`: per-agent webhook credentials for the agent bus
+- `discord_dashboard`: pinned dashboard message tracking
 
 Topic key format: `"{guild_id}:{channel_id}:{thread_id_or_root}"`
+
+See `docs/discord/swarm-surface.md#14-state-store-schema-v2` for full schemas.
 
 ## Concurrency model
 
@@ -190,6 +210,14 @@ so approval buttons survive bot restarts.
 | `/agent [name]` | Show or change the agent backend |
 | `/approvals [mode]` | Set approval and sandbox policy |
 | `/health` | Run health diagnostics |
+| `/setup` | Scaffold swarm control surface channels (see swarm-surface.md) |
+| `/workspaces` | List scaffolded workspaces with channel links |
+| `/tasks list` | List tasks filtered by workspace/tag |
+| `/tasks mine` | List tasks created by the caller |
+| `/review` | Run a code review |
+| `/flow` | Ticket flow controls |
+| `/compact` | Generate a conversation summary |
+| `/files` | View inbox/outbox files |
 
 Commands are registered on the discord.py `CommandTree` and synced to each allowed
 guild for instant availability (no 1-hour global sync delay).
@@ -228,6 +256,7 @@ for troubleshooting.
 
 ## References
 
+- `docs/discord/swarm-surface.md` — Swarm control surface (scaffolding, forum tasks, dashboard, RBAC, agent bus)
 - `docs/discord/security.md`
 - `docs/discord/discord-integration.md`
 - `docs/ops/discord-bot-runbook.md`
