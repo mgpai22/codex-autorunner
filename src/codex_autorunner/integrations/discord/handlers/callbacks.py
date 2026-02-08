@@ -70,6 +70,10 @@ async def dispatch_component_interaction(
             await _handle_selection_interaction(service, interaction, custom_id)
             return
 
+        if kind == "wscreate":
+            await service._handle_workspace_create_interaction(interaction, custom_id)
+            return
+
         log_event(
             logger, logging.DEBUG, "discord.callback.unknown", custom_id=custom_id
         )
@@ -253,6 +257,10 @@ async def dispatch_modal_submit(service: "DiscordBotService", interaction: Any) 
             )
         except Exception:
             pass
+        return
+
+    if len(parts) >= 2 and parts[0] == "wscreate":
+        await service._handle_workspace_create_modal(interaction, custom_id)
         return
 
 

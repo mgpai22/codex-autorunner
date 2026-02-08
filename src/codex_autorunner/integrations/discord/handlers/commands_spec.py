@@ -51,4 +51,5 @@ def build_slash_command_specs() -> dict[str, SlashCommandSpec]:
         "health": SlashCommandSpec(
             "health", "Run health diagnostics", allow_during_turn=True
         ),
+        "workspace": SlashCommandSpec("workspace", "Workspace management", allow_during_turn=True),
     }

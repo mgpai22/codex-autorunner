@@ -147,6 +147,7 @@ class DiscordScaffoldConfig:
     )
     activity_channel_name: str = "activity-feed"
     approval_channel_name: str = "approvals"
+    run_channel_name: str = "run"
     dashboard_channel_name: str = "dashboard"
     agent_bus_channel_name: str = "agent-bus"
     notifications_channel_name: str = "notifications"
@@ -532,6 +533,12 @@ class DiscordBotConfig:
         if not scaffold_approval_channel_name:
             scaffold_approval_channel_name = "approvals"
 
+        scaffold_run_channel_name = str(
+            scaffold_raw.get("run_channel_name", "run")
+        ).strip()
+        if not scaffold_run_channel_name:
+            scaffold_run_channel_name = "run"
+
         scaffold_dashboard_channel_name = str(
             scaffold_raw.get("dashboard_channel_name", "dashboard")
         ).strip()
@@ -559,6 +566,7 @@ class DiscordBotConfig:
             task_forum_tags=scaffold_task_forum_tags,
             activity_channel_name=scaffold_activity_channel_name,
             approval_channel_name=scaffold_approval_channel_name,
+            run_channel_name=scaffold_run_channel_name,
             dashboard_channel_name=scaffold_dashboard_channel_name,
             agent_bus_channel_name=scaffold_agent_bus_channel_name,
             notifications_channel_name=scaffold_notifications_channel_name,

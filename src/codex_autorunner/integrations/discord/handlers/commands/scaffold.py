@@ -175,6 +175,30 @@ class ScaffoldCommands:
                     exc=exc,
                 )
 
+            # --- Run channel (dedicated text channel for /run) ---
+            run_channel: Optional[Any] = None
+            try:
+                run_channel = await self._ensure_text_channel(
+                    category,
+                    guild_id=guild_id,
+                    workspace_id=workspace_id,
+                    channel_type="run",
+                    channel_name=scaffold.run_channel_name,
+                    overwrites=None,
+                    channels_created=channels_created,
+                )
+                if run_channel is not None:
+                    await self._move_into_category(run_channel, category)
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.ERROR,
+                    "discord.setup.run_channel_failed",
+                    guild_id=guild_id,
+                    workspace_id=workspace_id,
+                    exc=exc,
+                )
+
             if (
                 bool(scaffold.auto_bind)
                 and tasks_channel is not None
@@ -203,6 +227,27 @@ class ScaffoldCommands:
                         workspace_id=workspace_id,
                         channel_id=getattr(tasks_channel, "id", None),
                         workspace_path=workspace_path_str,
+                        exc=exc,
+                    )
+
+            # Auto-bind run channel to workspace path
+            if (
+                bool(scaffold.auto_bind)
+                and run_channel is not None
+                and workspace_path_str
+            ):
+                try:
+                    run_key = f"{guild_id}:{run_channel.id}"
+                    await self._store.set_channel_binding(
+                        run_key, workspace_path_str
+                    )
+                except Exception as exc:
+                    log_event(
+                        self._logger,
+                        logging.WARNING,
+                        "discord.setup.run_auto_bind_failed",
+                        guild_id=guild_id,
+                        workspace_id=workspace_id,
                         exc=exc,
                     )
 

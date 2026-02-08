@@ -41,6 +41,7 @@ from .handlers.commands.formatting import FormattingHelpers
 from .handlers.commands.scaffold import ScaffoldCommands
 from .handlers.commands.shared import SharedHelpers
 from .handlers.commands.workspace import WorkspaceCommands
+from .handlers.commands.workspace_create import WorkspaceCreateCommands
 from .handlers.commands_runtime import DiscordCommandHandlers
 from .handlers.dashboard import DiscordDashboardMixin
 from .handlers.questions import DiscordQuestionHandlers
@@ -64,6 +65,7 @@ from .types import (
     PendingQuestion,
     SelectionState,
     TurnContext,
+    WorkspaceCreateSession,
 )
 
 try:
@@ -115,6 +117,7 @@ class DiscordBotService(
     SharedHelpers,
     ExecutionCommands,
     WorkspaceCommands,
+    WorkspaceCreateCommands,
     FormattingHelpers,
     ScaffoldCommands,
     DiscordRBACMixin,
@@ -217,6 +220,7 @@ class DiscordBotService(
         self._agent_options: dict[str, SelectionState] = {}
         self._resume_options: dict[str, SelectionState] = {}
         self._bind_options: dict[str, SelectionState] = {}
+        self._ws_create_sessions: dict[str, WorkspaceCreateSession] = {}
         self._compact_pending: dict[str, CompactState] = {}
         self._token_usage_by_thread: "collections.OrderedDict[str, dict[str, Any]]" = (
             collections.OrderedDict()

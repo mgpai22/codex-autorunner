@@ -78,3 +78,18 @@ class ReviewCommitSelectionState(SelectionState):
 @dataclass
 class ModelPickerState(SelectionState):
     options: dict[str, ModelOption] = dataclasses.field(default_factory=dict)
+
+
+@dataclass
+class WorkspaceCreateSession:
+    user_id: int
+    guild_id: int
+    ws_type: str  # "new" | "clone" | "worktree"
+    repo_id: Optional[str] = None
+    repo_path: Optional[str] = None
+    git_url: Optional[str] = None
+    base_repo_id: Optional[str] = None
+    branch: Optional[str] = None
+    start_point: Optional[str] = None
+    git_init: bool = True
+    created_at: str = ""
