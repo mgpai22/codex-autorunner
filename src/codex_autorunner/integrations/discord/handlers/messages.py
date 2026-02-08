@@ -81,10 +81,11 @@ async def handle_message(service: "DiscordBotService", message: Any) -> None:
         if record is None:
             log_event(
                 logger,
-                logging.DEBUG,
+                logging.INFO,
                 "discord.message.no_binding",
                 guild_id=guild_id,
                 channel_id=channel_id,
+                topic_key=topic_key,
             )
             return
 

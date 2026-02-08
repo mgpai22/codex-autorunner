@@ -73,6 +73,8 @@ class ExecutionCommands:
                 record.codex_thread_id = codex_thread_id
                 record.updated_at = now_iso()
                 await self._store.save_topic(topic_key, record)
+            else:
+                await self._ensure_thread_alive(client, codex_thread_id, topic_key)
 
             # ---- 4. Send placeholder ----
             placeholder_id = await self._send_placeholder(target_id, "Working...")
@@ -135,12 +137,70 @@ class ExecutionCommands:
                     pass
 
             # ---- 8. Start the turn ----
-            turn_handle = await client.turn_start(
-                codex_thread_id,
-                prompt,
-                approval_policy=approval_policy,
-                sandbox_policy=sandbox_policy,
-            )
+            try:
+                turn_handle = await client.turn_start(
+                    codex_thread_id,
+                    prompt,
+                    approval_policy=approval_policy,
+                    sandbox_policy=sandbox_policy,
+                )
+            except Exception as turn_exc:
+                # If the thread was stale (e.g. app-server restarted), try to
+                # resume the session from disk before falling back to a fresh thread.
+                if "thread not found" in str(turn_exc).lower():
+                    log_event(
+                        self._logger,
+                        logging.WARNING,
+                        "discord.turn.stale_thread",
+                        topic_key=topic_key,
+                        stale_thread_id=codex_thread_id,
+                    )
+                    # Attempt resume from persisted session files
+                    resumed = False
+                    try:
+                        await client.thread_resume(codex_thread_id)
+                        turn_handle = await client.turn_start(
+                            codex_thread_id,
+                            prompt,
+                            approval_policy=approval_policy,
+                            sandbox_policy=sandbox_policy,
+                        )
+                        resumed = True
+                        log_event(
+                            self._logger,
+                            logging.INFO,
+                            "discord.turn.resumed",
+                            topic_key=topic_key,
+                            codex_thread_id=codex_thread_id,
+                        )
+                    except Exception as resume_exc:
+                        log_event(
+                            self._logger,
+                            logging.WARNING,
+                            "discord.turn.resume_failed",
+                            topic_key=topic_key,
+                            codex_thread_id=codex_thread_id,
+                            exc=resume_exc,
+                        )
+                    if not resumed:
+                        # Fall back to fresh thread
+                        thread_result = await client.thread_start(
+                            cwd=record.workspace_path or "."
+                        )
+                        codex_thread_id = thread_result.get("id")
+                        if not codex_thread_id:
+                            raise RuntimeError("Failed to start fresh thread after stale thread") from turn_exc
+                        record.codex_thread_id = codex_thread_id
+                        record.updated_at = now_iso()
+                        await self._store.save_topic(topic_key, record)
+                        turn_handle = await client.turn_start(
+                            codex_thread_id,
+                            prompt,
+                            approval_policy=approval_policy,
+                            sandbox_policy=sandbox_policy,
+                        )
+                else:
+                    raise
 
             # ---- 9. Wait for completion ----
             agent_timeout = self._config.agent_turn_timeout_seconds.get(
@@ -319,6 +379,23 @@ class ExecutionCommands:
             except Exception:
                 pass
             semaphore.release()
+
+    async def _ensure_thread_alive(self, client: Any, codex_thread_id: str, topic_key: str) -> None:
+        """Proactively resume a codex thread so the app-server has it loaded.
+
+        Non-fatal — errors are logged and swallowed so the turn can still proceed.
+        """
+        try:
+            await client.thread_resume(codex_thread_id)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                logging.WARNING,
+                "discord.thread.resume_failed",
+                topic_key=topic_key,
+                codex_thread_id=codex_thread_id,
+                exc=exc,
+            )
 
     async def _cmd_run_impl(self, interaction: Any, prompt: str) -> None:
         """Implementation for /run slash command."""
