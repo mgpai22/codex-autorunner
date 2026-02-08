@@ -96,6 +96,12 @@ class DiscordCommandHandlers:
         ) -> None:
             await self._handle_slash_model(interaction, name)
 
+        @cmd_model.autocomplete("name")
+        async def model_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            return await self._autocomplete_model(interaction, current)
+
         @tree.command(name="agent", description="Show or change the agent")
         @app_commands.describe(name="Agent name to switch to (optional)")
         async def cmd_agent(
@@ -342,6 +348,102 @@ class DiscordCommandHandlers:
                     "or `/resume <thread_id>` to resume a specific thread.",
                     ephemeral=True,
                 )
+
+    async def _autocomplete_model(
+        self, interaction: Any, current: str
+    ) -> list[Any]:
+        """Return model choices for the /model autocomplete."""
+        from discord import app_commands
+
+        choices: list[app_commands.Choice[str]] = []
+
+        # Try to fetch live model list from the app-server.
+        try:
+            guild_id = interaction.guild_id
+            channel = interaction.channel
+            if isinstance(channel, discord.Thread):
+                channel_id = channel.parent_id
+            else:
+                channel_id = channel.id
+            channel_key = f"{guild_id}:{channel_id}"
+            binding = await self._store.get_channel_binding(channel_key)
+            if binding:
+                client = await self._client_for_workspace(binding)
+                if client is not None:
+                    from ..constants import DEFAULT_AGENT, DEFAULT_MODEL_LIST_LIMIT
+
+                    record = None
+                    try:
+                        from ..helpers import build_topic_key
+
+                        thread_id = (
+                            channel.id
+                            if isinstance(channel, discord.Thread)
+                            else None
+                        )
+                        topic_key = build_topic_key(guild_id, channel_id, thread_id)
+                        record = await self._store.get_topic(topic_key)
+                    except Exception:
+                        pass
+                    agent = (
+                        (record.agent if record else None) or DEFAULT_AGENT
+                    )
+                    result = await client.model_list(
+                        agent=agent, limit=DEFAULT_MODEL_LIST_LIMIT
+                    )
+                    entries: list[dict[str, Any]] = []
+                    if isinstance(result, list):
+                        entries = [e for e in result if isinstance(e, dict)]
+                    elif isinstance(result, dict):
+                        for key in ("data", "models", "items", "results"):
+                            value = result.get(key)
+                            if isinstance(value, list):
+                                entries = [
+                                    e for e in value if isinstance(e, dict)
+                                ]
+                                break
+                    for entry in entries[:25]:
+                        model_id = entry.get("model") or entry.get("id")
+                        if not isinstance(model_id, str) or not model_id:
+                            continue
+                        display = entry.get("displayName")
+                        label = (
+                            f"{display} ({model_id})"
+                            if isinstance(display, str) and display and display != model_id
+                            else model_id
+                        )
+                        # Discord caps choice name at 100 chars
+                        if len(label) > 100:
+                            label = label[:97] + "..."
+                        choices.append(
+                            app_commands.Choice(name=label, value=model_id)
+                        )
+        except Exception:
+            pass
+
+        # Fall back to well-known models if the live list is empty.
+        if not choices:
+            from ..constants import DEFAULT_AGENT_MODELS
+
+            fallback = [
+                ("claude-sonnet-4-5-20250929", "Claude Sonnet 4.5"),
+                ("claude-opus-4-6", "Claude Opus 4.6"),
+                ("o4-mini", "o4-mini"),
+                ("gpt-5.3-codex", "GPT-5.3 Codex"),
+            ]
+            for model_id, display in fallback:
+                choices.append(
+                    app_commands.Choice(
+                        name=f"{display} ({model_id})", value=model_id
+                    )
+                )
+
+        # Filter by what the user has typed so far.
+        if current:
+            lower = current.lower()
+            choices = [c for c in choices if lower in c.name.lower() or lower in c.value.lower()]
+
+        return choices[:25]
 
     async def _handle_slash_model(self, interaction: Any, name: Optional[str]) -> None:
         await interaction.response.defer(ephemeral=True)

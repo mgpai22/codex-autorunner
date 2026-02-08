@@ -137,12 +137,21 @@ class ExecutionCommands:
                     pass
 
             # ---- 8. Start the turn ----
+            turn_kwargs: dict[str, Any] = {}
+            if record.agent:
+                turn_kwargs["agent"] = record.agent
+            if record.model:
+                turn_kwargs["model"] = record.model
+            if getattr(record, "reasoning_effort", None):
+                turn_kwargs["effort"] = record.reasoning_effort
+
             try:
                 turn_handle = await client.turn_start(
                     codex_thread_id,
                     prompt,
                     approval_policy=approval_policy,
                     sandbox_policy=sandbox_policy,
+                    **turn_kwargs,
                 )
             except Exception as turn_exc:
                 # If the thread was stale (e.g. app-server restarted), try to
@@ -164,6 +173,7 @@ class ExecutionCommands:
                             prompt,
                             approval_policy=approval_policy,
                             sandbox_policy=sandbox_policy,
+                            **turn_kwargs,
                         )
                         resumed = True
                         log_event(
@@ -198,6 +208,7 @@ class ExecutionCommands:
                             prompt,
                             approval_policy=approval_policy,
                             sandbox_policy=sandbox_policy,
+                            **turn_kwargs,
                         )
                 else:
                     raise
