@@ -168,7 +168,7 @@ synced to each guild in `allowed_guild_ids` for instant availability.
 
 | Command | Parameters | Description |
 |---------|-----------|-------------|
-| `/run` | `prompt: str` | Start an agent task with the given prompt |
+| `/run` | `prompt: str`, `model: str?`, `effort: str?` | Start an agent task with the given prompt. Optional `model` (default: `gpt-5.3-codex`) and `effort` (default: `medium`) override for this invocation. Both support autocomplete. |
 | `/stop` | - | Interrupt the active task in this context |
 | `/new` | - | Clear thread context and start a new conversation |
 | `/resume` | `thread_id: str?` | Resume a previous conversation |
@@ -179,6 +179,9 @@ synced to each guild in `allowed_guild_ids` for instant availability.
 | `/agent` | `name: str?` | Show or switch the agent backend |
 | `/approvals` | `mode: str?` | Set approval and sandbox policy (safe/yolo) |
 | `/health` | - | Run health diagnostics |
+| `/workspace create` | - | Create a new workspace (interactive modal flow) |
+| `/workspace clone` | `url: str`, `name: str?` | Clone a git repo into a new workspace (direct) |
+| `/workspaces` | - | List scaffolded workspaces with channel links |
 
 ### Interaction Deadline
 

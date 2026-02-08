@@ -227,7 +227,7 @@ thread serves as the isolated execution context (`topic_key`).
 
 ### Creation flow
 
-When `/run <prompt>` is used inside a scaffolded `tasks` forum:
+When `/run <prompt> [model] [effort]` is used inside a scaffolded `tasks` forum:
 
 1. **Resolve workspace** from the channel binding
 2. **Resolve the forum channel** from `discord_scaffolded_channels`
@@ -237,7 +237,33 @@ When `/run <prompt>` is used inside a scaffolded `tasks` forum:
    - Initial tag: `queued`
 4. **Build topic_key**: `{guild_id}:{forum_channel_id}:{thread.id}`
 5. **Store in SQLite**: `discord_tasks` table with root_message_id, prompt, user
-6. **Execute the turn** in the thread context
+6. **Apply model/effort**: set `model` and `reasoning_effort` on the topic record (per-invocation override)
+7. **Execute the turn** in the thread context
+
+### Inline model & effort
+
+`/run` accepts optional `model` and `effort` parameters so each invocation can
+override the model and reasoning effort without changing persistent topic state
+via `/model` or `/agent`:
+
+```
+/run fix the bug                                  # defaults: gpt-5.3-codex, medium
+/run fix the bug model:claude-sonnet-4-5-20250929   # override model only
+/run fix the bug effort:high                      # override effort only
+/run fix the bug model:o4-mini effort:xhigh       # override both
+```
+
+| Parameter | Default | Autocomplete | Valid values |
+|-----------|---------|--------------|--------------|
+| `model` | `gpt-5.3-codex` | Live model list from app-server (falls back to well-known models) | Any model ID returned by the app-server |
+| `effort` | `medium` | Static list | `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
+
+The override is applied to the `DiscordTopicRecord` before execution, so it
+affects the current turn. Subsequent `/run` calls without explicit values revert
+to the defaults. The existing `/model` and `/agent` commands continue to work
+independently for persistent configuration.
+
+**Implementation**: `ExecutionCommands._cmd_run_impl()` in `handlers/commands/execution.py`
 
 ### State transitions (forum tags)
 
@@ -555,6 +581,53 @@ Set `alerts.alert_role_id: null` or `alerts.enabled: false` to disable all pings
 
 Discord-native navigation commands so the swarm is operable from mobile.
 
+### `/workspace create`
+
+Interactive multi-step flow: select type (new / clone / worktree) → fill modal → confirm → scaffold.
+
+Steps:
+1. Select menu with workspace type
+2. Modal collects type-specific fields (repo ID, git URL, branch, etc.)
+3. Bot defers, creates workspace via `HubSupervisor`, scaffolds category + channels, auto-binds
+
+**Implementation**: `WorkspaceCreateCommands` mixin in `handlers/commands/workspace_create.py`
+**Session**: `WorkspaceCreateSession` dataclass in `types.py`
+**Pipeline**: `_ws_create_execute()` — shared by both `/workspace create` and `/workspace clone`
+
+### `/workspace clone`
+
+Direct slash command shortcut for cloning a git repository into a new workspace. No modal — just type the URL:
+
+```
+/workspace clone url:github.com/user/repo
+/workspace clone url:https://www.github.com/user/repo.git
+/workspace clone url:git@github.com:user/repo.git name:my-project
+```
+
+| Parameter | Required | Description |
+|-----------|----------|-------------|
+| `url` | yes | Git URL to clone (bare domain, HTTPS, SSH, `git://`) |
+| `name` | no | Custom workspace name (inferred from URL if omitted) |
+
+**URL normalization** (`normalize_git_url()`):
+
+| Input | Normalized Output |
+|-------|-------------------|
+| `https://github.com/user/repo` | `https://github.com/user/repo` |
+| `https://www.github.com/user/repo` | `https://github.com/user/repo` |
+| `github.com/user/repo` | `https://github.com/user/repo` |
+| `www.github.com/user/repo` | `https://github.com/user/repo` |
+| `github.com/user/repo.git` | `https://github.com/user/repo.git` |
+| `git@github.com:user/repo.git` | `git@github.com:user/repo.git` |
+| `git://github.com/user/repo` | `git://github.com/user/repo` |
+| `gitlab.example.com/org/repo` | `https://gitlab.example.com/org/repo` |
+
+**Validation** (`_validate_git_url()`): rejects empty URLs, SSH with no path, scheme with no hostname/path.
+
+**Flow**: RBAC check (`can_setup`) → defer ephemeral → normalize → validate → create `WorkspaceCreateSession` → `_ws_create_execute()` (clone → scaffold category + channels → auto-bind → confirmation embed).
+
+**Implementation**: `WorkspaceCreateCommands._cmd_workspace_clone_impl()` in `handlers/commands/workspace_create.py`
+
 ### `/workspaces`
 
 Lists all scaffolded workspaces with clickable channel links.
@@ -593,6 +666,7 @@ All new commands are registered in `commands_spec.py`:
 | Command | `allow_during_turn` | Description |
 |---|---|---|
 | `/setup` | yes | Scaffold swarm control surface channels |
+| `/workspace` | yes | Workspace management (create, clone) |
 | `/workspaces` | yes | List scaffolded workspaces |
 | `/tasks` | yes | Task triage and navigation |
 
@@ -779,6 +853,7 @@ The single-threaded executor ensures SQLite thread-safety.
 | File | Lines | Description |
 |---|---|---|
 | `handlers/commands/scaffold.py` | ~550 | `ScaffoldCommands` mixin — `/setup` implementation |
+| `handlers/commands/workspace_create.py` | ~750 | `WorkspaceCreateCommands` mixin — `/workspace create` and `/workspace clone` |
 | `handlers/tasks.py` | ~740 | `DiscordTasksMixin` — task cards, controls, triage commands |
 | `handlers/rbac.py` | ~165 | `DiscordRBACMixin` — role-based access control |
 | `handlers/dashboard.py` | ~300 | `DiscordDashboardMixin` — live dashboard |
@@ -794,9 +869,9 @@ The single-threaded executor ensures SQLite thread-safety.
 | `rendering.py` | 7 new embed builders: `build_setup_summary_embed`, `build_task_card_embed`, `build_tasks_list_embed`, `build_workspaces_embed`, `build_dashboard_embed`, `build_agent_bus_embed`, `build_handoff_embed` |
 | `notifications.py` | `_post_task_activity()`, `_maybe_send_task_alert()`, `_note_task_needs_approval()`, `_post_lifecycle_to_agent_bus()` |
 | `handlers/commands/execution.py` | `/run` creates forum tasks when in scaffolded forum; state transitions wired (running, done, timeout, stopped, failed) |
-| `handlers/commands_runtime.py` | `/setup`, `/workspaces`, `/tasks list`, `/tasks mine` registered |
-| `handlers/commands_spec.py` | New command specs (setup, workspaces, tasks) |
-| `handlers/callbacks.py` | `task:*` custom_id routing → `_handle_task_button()` |
+| `handlers/commands_runtime.py` | `/setup`, `/workspace create`, `/workspace clone`, `/workspaces`, `/tasks list`, `/tasks mine` registered |
+| `handlers/commands_spec.py` | New command specs (setup, workspace, workspaces, tasks) |
+| `handlers/callbacks.py` | `task:*` and `wscreate:*` custom_id routing |
 | `helpers.py` | `sanitize_thread_name()` |
 | `constants.py` | `THREAD_NAME_MAX_LEN = 100` |
 
@@ -814,6 +889,7 @@ class DiscordBotService(
     SharedHelpers,
     ExecutionCommands,
     WorkspaceCommands,
+    WorkspaceCreateCommands,   # NEW — /workspace create, /workspace clone
     FormattingHelpers,
     ScaffoldCommands,          # NEW — /setup
     DiscordRBACMixin,          # NEW — role-based access

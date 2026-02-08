@@ -52,7 +52,7 @@ discord_bot:
 
 | Command | Description |
 |---------|-------------|
-| `/run <prompt>` | Start an agent task |
+| `/run <prompt> [model] [effort]` | Start an agent task (model default: `gpt-5.3-codex`, effort default: `medium`) |
 | `/stop` | Interrupt the active task |
 | `/new` | Start a new conversation |
 | `/resume [thread_id]` | Resume a previous conversation |
@@ -63,6 +63,9 @@ discord_bot:
 | `/agent [name]` | Show or change the agent |
 | `/approvals [mode]` | Set approval mode (safe/yolo) |
 | `/health` | Run health diagnostics |
+| `/workspace create` | Create a new workspace (interactive flow) |
+| `/workspace clone <url> [name]` | Clone a git repo into a new workspace |
+| `/workspaces` | List scaffolded workspaces |
 
 ## Health Check
 
