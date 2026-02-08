@@ -23,7 +23,7 @@ APPROVAL_MODE_SAFE = "safe"
 APPROVAL_MODES = {APPROVAL_MODE_YOLO, APPROVAL_MODE_SAFE}
 AGENT_VALUES = {"codex", "opencode"}
 
-DISCORD_SCHEMA_VERSION = 2
+DISCORD_SCHEMA_VERSION = 3
 
 
 # ---------------------------------------------------------------------------
@@ -819,6 +819,92 @@ class DiscordStateStore:
         await self._run(self._update_dashboard_timestamp_sync, guild_id)
 
     # ------------------------------------------------------------------
+    # Swarms
+    # ------------------------------------------------------------------
+
+    async def save_swarm(
+        self,
+        swarm_id: str,
+        guild_id: int,
+        workspace_id: str,
+        workspace_path: str,
+        forum_channel_id: int,
+        team_name: str,
+        preset_name: str,
+        prompt: str,
+        user_id: int,
+        status: str = "starting",
+        data: Optional[str] = None,
+    ) -> None:
+        await self._run(
+            self._save_swarm_sync,
+            swarm_id,
+            guild_id,
+            workspace_id,
+            workspace_path,
+            forum_channel_id,
+            team_name,
+            preset_name,
+            prompt,
+            user_id,
+            status,
+            data,
+        )
+
+    async def get_swarm(self, swarm_id: str) -> Optional[dict[str, Any]]:
+        return await self._run(self._get_swarm_sync, swarm_id)
+
+    async def list_swarms(
+        self, guild_id: Optional[int] = None, status: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        return await self._run(self._list_swarms_sync, guild_id, status)
+
+    async def update_swarm_status(self, swarm_id: str, status: str) -> None:
+        await self._run(self._update_swarm_status_sync, swarm_id, status)
+
+    async def save_swarm_agent(
+        self,
+        swarm_id: str,
+        agent_name: str,
+        agent_id: str,
+        role_name: str,
+        model: Optional[str] = None,
+        is_lead: bool = False,
+        discord_thread_id: Optional[int] = None,
+        discord_root_message_id: Optional[int] = None,
+        status: str = "spawning",
+        pid: Optional[int] = None,
+    ) -> None:
+        await self._run(
+            self._save_swarm_agent_sync,
+            swarm_id,
+            agent_name,
+            agent_id,
+            role_name,
+            model,
+            is_lead,
+            discord_thread_id,
+            discord_root_message_id,
+            status,
+            pid,
+        )
+
+    async def update_swarm_agent_status(
+        self, swarm_id: str, agent_name: str, status: str
+    ) -> None:
+        await self._run(
+            self._update_swarm_agent_status_sync, swarm_id, agent_name, status
+        )
+
+    async def delete_swarm(self, swarm_id: str) -> None:
+        await self._run(self._delete_swarm_sync, swarm_id)
+
+    async def list_swarm_agents(
+        self, swarm_id: str
+    ) -> list[dict[str, Any]]:
+        return await self._run(self._list_swarm_agents_sync, swarm_id)
+
+    # ------------------------------------------------------------------
     # Internal: async executor bridge
     # ------------------------------------------------------------------
 
@@ -981,6 +1067,45 @@ class DiscordStateStore:
                     message_id INTEGER NOT NULL,
                     pinned_at TEXT NOT NULL,
                     last_updated_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_swarms (
+                    swarm_id TEXT PRIMARY KEY,
+                    guild_id INTEGER NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    workspace_path TEXT NOT NULL,
+                    forum_channel_id INTEGER NOT NULL,
+                    team_name TEXT NOT NULL,
+                    preset_name TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'starting',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    data TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS discord_swarm_agents (
+                    swarm_id TEXT NOT NULL REFERENCES discord_swarms(swarm_id) ON DELETE CASCADE,
+                    agent_name TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    role_name TEXT NOT NULL,
+                    model TEXT,
+                    is_lead INTEGER NOT NULL DEFAULT 0,
+                    discord_thread_id INTEGER,
+                    discord_root_message_id INTEGER,
+                    status TEXT NOT NULL DEFAULT 'spawning',
+                    pid INTEGER,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    last_message_at TEXT,
+                    PRIMARY KEY (swarm_id, agent_name)
                 )
                 """
             )
@@ -2003,6 +2128,190 @@ class DiscordStateStore:
                 """,
                 (now, guild_id),
             )
+
+    # ------------------------------------------------------------------
+    # Sync: swarms
+    # ------------------------------------------------------------------
+
+    def _save_swarm_sync(
+        self,
+        swarm_id: str,
+        guild_id: int,
+        workspace_id: str,
+        workspace_path: str,
+        forum_channel_id: int,
+        team_name: str,
+        preset_name: str,
+        prompt: str,
+        user_id: int,
+        status: str,
+        data: Optional[str],
+    ) -> None:
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_swarms (
+                    swarm_id, guild_id, workspace_id, workspace_path,
+                    forum_channel_id, team_name, preset_name, prompt,
+                    user_id, status, created_at, updated_at, data
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(swarm_id) DO UPDATE SET
+                    status=excluded.status,
+                    updated_at=excluded.updated_at,
+                    data=excluded.data
+                """,
+                (
+                    swarm_id, guild_id, workspace_id, workspace_path,
+                    forum_channel_id, team_name, preset_name, prompt,
+                    user_id, status, now, now, data,
+                ),
+            )
+
+    def _get_swarm_sync(self, swarm_id: str) -> Optional[dict[str, Any]]:
+        if not isinstance(swarm_id, str) or not swarm_id:
+            return None
+        conn = self._connection_sync()
+        row = conn.execute(
+            "SELECT * FROM discord_swarms WHERE swarm_id = ?",
+            (swarm_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def _list_swarms_sync(
+        self, guild_id: Optional[int], status: Optional[str]
+    ) -> list[dict[str, Any]]:
+        conn = self._connection_sync()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if guild_id is not None and isinstance(guild_id, int) and not isinstance(guild_id, bool):
+            clauses.append("guild_id = ?")
+            params.append(guild_id)
+        if status is not None and isinstance(status, str) and status:
+            clauses.append("status = ?")
+            params.append(status)
+        query = "SELECT * FROM discord_swarms"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC"
+        records: list[dict[str, Any]] = []
+        for row in conn.execute(query, tuple(params)):
+            records.append(dict(row))
+        return records
+
+    def _update_swarm_status_sync(self, swarm_id: str, status: str) -> None:
+        if not isinstance(swarm_id, str) or not swarm_id:
+            return
+        if not isinstance(status, str) or not status:
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                UPDATE discord_swarms
+                   SET status = ?, updated_at = ?
+                 WHERE swarm_id = ?
+                """,
+                (status, now, swarm_id),
+            )
+
+    def _save_swarm_agent_sync(
+        self,
+        swarm_id: str,
+        agent_name: str,
+        agent_id: str,
+        role_name: str,
+        model: Optional[str],
+        is_lead: bool,
+        discord_thread_id: Optional[int],
+        discord_root_message_id: Optional[int],
+        status: str,
+        pid: Optional[int],
+    ) -> None:
+        conn = self._connection_sync()
+        now = now_iso()
+        with conn:
+            conn.execute(
+                """
+                INSERT INTO discord_swarm_agents (
+                    swarm_id, agent_name, agent_id, role_name, model,
+                    is_lead, discord_thread_id, discord_root_message_id,
+                    status, pid, started_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(swarm_id, agent_name) DO UPDATE SET
+                    agent_id=excluded.agent_id,
+                    role_name=excluded.role_name,
+                    model=excluded.model,
+                    is_lead=excluded.is_lead,
+                    discord_thread_id=excluded.discord_thread_id,
+                    discord_root_message_id=excluded.discord_root_message_id,
+                    status=excluded.status,
+                    pid=excluded.pid,
+                    started_at=excluded.started_at
+                """,
+                (
+                    swarm_id, agent_name, agent_id, role_name, model,
+                    1 if is_lead else 0, discord_thread_id, discord_root_message_id,
+                    status, pid, now,
+                ),
+            )
+
+    def _update_swarm_agent_status_sync(
+        self, swarm_id: str, agent_name: str, status: str
+    ) -> None:
+        if not isinstance(swarm_id, str) or not swarm_id:
+            return
+        if not isinstance(agent_name, str) or not agent_name:
+            return
+        if not isinstance(status, str) or not status:
+            return
+        conn = self._connection_sync()
+        now = now_iso()
+        update_fields = "status = ?, last_message_at = ?"
+        params: list[Any] = [status, now]
+        if status in ("completed", "failed", "stopped"):
+            update_fields = "status = ?, finished_at = ?, last_message_at = ?"
+            params = [status, now, now]
+        params.extend([swarm_id, agent_name])
+        with conn:
+            conn.execute(
+                f"""
+                UPDATE discord_swarm_agents
+                   SET {update_fields}
+                 WHERE swarm_id = ? AND agent_name = ?
+                """,
+                tuple(params),
+            )
+
+    def _delete_swarm_sync(self, swarm_id: str) -> None:
+        if not isinstance(swarm_id, str) or not swarm_id:
+            return
+        conn = self._connection_sync()
+        with conn:
+            conn.execute(
+                "DELETE FROM discord_swarm_agents WHERE swarm_id = ?",
+                (swarm_id,),
+            )
+            conn.execute(
+                "DELETE FROM discord_swarms WHERE swarm_id = ?",
+                (swarm_id,),
+            )
+
+    def _list_swarm_agents_sync(self, swarm_id: str) -> list[dict[str, Any]]:
+        if not isinstance(swarm_id, str) or not swarm_id:
+            return []
+        conn = self._connection_sync()
+        records: list[dict[str, Any]] = []
+        for row in conn.execute(
+            "SELECT * FROM discord_swarm_agents WHERE swarm_id = ? ORDER BY agent_name",
+            (swarm_id,),
+        ):
+            records.append(dict(row))
+        return records
 
 
 # ---------------------------------------------------------------------------

@@ -74,6 +74,32 @@ async def dispatch_component_interaction(
             await service._handle_workspace_create_interaction(interaction, custom_id)
             return
 
+        if kind == "swarm":
+            # Format: swarm:{action}:{swarm_id}[:{extra}]
+            if len(parts) >= 3:
+                action = parts[1]
+                swarm_id = parts[2]
+                if action == "stop":
+                    manager = getattr(service, "_swarm_manager", None)
+                    if manager is not None and manager.is_swarm_active(swarm_id):
+                        await manager.stop_swarm(swarm_id)
+                        try:
+                            await interaction.response.send_message(
+                                f"Swarm `{swarm_id[:8]}` stopped.",
+                                ephemeral=True,
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            await interaction.response.send_message(
+                                "Swarm not found or already stopped.",
+                                ephemeral=True,
+                            )
+                        except Exception:
+                            pass
+            return
+
         log_event(
             logger, logging.DEBUG, "discord.callback.unknown", custom_id=custom_id
         )

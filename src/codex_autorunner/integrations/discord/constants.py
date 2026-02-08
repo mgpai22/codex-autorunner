@@ -303,6 +303,19 @@ DEFAULT_UPDATE_REPO_URL = "https://github.com/Git-on-my-level/codex-autorunner.g
 DEFAULT_UPDATE_REPO_REF = "main"
 
 # ---------------------------------------------------------------------------
+# Swarm
+# ---------------------------------------------------------------------------
+SWARM_MAX_AGENTS = 6
+SWARM_POLL_INTERVAL_SECONDS = 0.5
+SWARM_AGENT_TIMEOUT_SECONDS = 3600.0
+SWARM_TIMEOUT_SECONDS = 7200.0
+SWARM_HEALTH_CHECK_INTERVAL_SECONDS = 5.0
+SWARM_SHUTDOWN_GRACE_SECONDS = 10.0
+SWARM_THREAD_NAME_PREFIX = "[swarm]"
+SWARM_FORUM_TAG_NAME = "swarm"
+EMBED_COLOR_SWARM = 0x9B59B6  # Purple
+
+# ---------------------------------------------------------------------------
 # Type aliases
 # ---------------------------------------------------------------------------
 TurnKey = tuple[str, str]

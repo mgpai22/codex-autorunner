@@ -182,6 +182,9 @@ synced to each guild in `allowed_guild_ids` for instant availability.
 | `/workspace create` | - | Create a new workspace (interactive modal flow) |
 | `/workspace clone` | `url: str`, `name: str?` | Clone a git repo into a new workspace (direct) |
 | `/workspaces` | - | List scaffolded workspaces with channel links |
+| `/swarm` | `prompt: str`, `preset: str?` | Start a multi-agent swarm. Default preset: `code-review`. |
+| `/swarm-stop` | `swarm_id: str?` | Stop an active swarm (all swarms if no ID given) |
+| `/swarm-status` | `swarm_id: str?` | Show swarm status (latest swarm if no ID given) |
 
 ### Interaction Deadline
 

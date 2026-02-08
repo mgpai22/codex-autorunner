@@ -41,6 +41,7 @@ from .handlers.commands.formatting import FormattingHelpers
 from .handlers.commands.scaffold import ScaffoldCommands
 from .handlers.commands.shared import SharedHelpers
 from .handlers.commands.workspace import WorkspaceCommands
+from .handlers.commands.swarm_commands import SwarmCommands
 from .handlers.commands.workspace_create import WorkspaceCreateCommands
 from .handlers.commands_runtime import DiscordCommandHandlers
 from .handlers.dashboard import DiscordDashboardMixin
@@ -120,6 +121,7 @@ class DiscordBotService(
     WorkspaceCreateCommands,
     FormattingHelpers,
     ScaffoldCommands,
+    SwarmCommands,
     DiscordRBACMixin,
     DiscordAgentBusMixin,
     DiscordDashboardMixin,
@@ -140,6 +142,7 @@ class DiscordBotService(
     - WorkspaceCommands: /bind, /status command implementations
     - FormattingHelpers: consistent embed formatting
     - ScaffoldCommands: /setup scaffolding for swarm control surface
+    - SwarmCommands: /swarm, /swarm-stop, /swarm-status commands
     - DiscordRBACMixin: role-based access control helpers
     - DiscordAgentBusMixin: lifecycle/coordination event bus posting
     - DiscordDashboardMixin: pinned dashboard embed maintenance
@@ -242,6 +245,9 @@ class DiscordBotService(
         self._turn_progress_tasks: dict[TurnKey, asyncio.Task[None]] = {}
         self._turn_progress_heartbeat_tasks: dict[TurnKey, asyncio.Task[None]] = {}
         self._turn_progress_locks: dict[TurnKey, asyncio.Lock] = {}
+
+        # Swarm manager (lazy-initialized by SwarmCommands mixin)
+        self._swarm_manager: Optional[Any] = None
 
         # Background task holders
         self._outbox_task: Optional[asyncio.Task[None]] = None
@@ -376,6 +382,19 @@ class DiscordBotService(
         if discord is None:
             return
         count = len(self._turn_contexts)
+
+        # Swarm agents are also "tasks" from an ops perspective.
+        manager = getattr(self, "_swarm_manager", None)
+        if manager is not None:
+            try:
+                count += int(getattr(manager, "get_active_agent_count")())
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "discord.presence.swarm_count_failed",
+                    exc=exc,
+                )
         label = f"{count} tasks" if count != 1 else "1 task"
         activity = discord.Activity(type=discord.ActivityType.watching, name=label)
         try:
@@ -396,6 +415,32 @@ class DiscordBotService(
     async def _reconcile_on_ready(self) -> None:
         if discord is None:
             return
+
+        # Mark stale swarms as stopped (processes don't survive restarts)
+        for guild_id in self._config.allowed_guild_ids:
+            try:
+                stale_swarms = await self._store.list_swarms(
+                    int(guild_id), status="running"
+                )
+                for swarm in stale_swarms:
+                    sid = swarm.get("swarm_id", "")
+                    if sid:
+                        await self._store.update_swarm_status(sid, "stopped")
+                        log_event(
+                            self._logger,
+                            logging.INFO,
+                            "discord.reconcile.swarm_marked_stopped",
+                            swarm_id=sid,
+                            guild_id=guild_id,
+                        )
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.DEBUG,
+                    "discord.reconcile.swarm_cleanup_failed",
+                    guild_id=guild_id,
+                    exc=exc,
+                )
 
         for guild_id in self._config.allowed_guild_ids:
             try:
@@ -696,6 +741,18 @@ class DiscordBotService(
 
     async def _shutdown(self) -> None:
         """Clean up resources on shutdown."""
+        # Stop active swarms
+        if self._swarm_manager is not None:
+            try:
+                await self._swarm_manager.stop_all()
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    logging.WARNING,
+                    "discord.shutdown.swarm_cleanup_failed",
+                    exc=exc,
+                )
+
         for task in list(self._spawned_tasks):
             task.cancel()
         if self._outbox_task is not None:

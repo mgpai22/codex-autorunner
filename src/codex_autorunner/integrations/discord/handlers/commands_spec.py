@@ -52,4 +52,7 @@ def build_slash_command_specs() -> dict[str, SlashCommandSpec]:
             "health", "Run health diagnostics", allow_during_turn=True
         ),
         "workspace": SlashCommandSpec("workspace", "Workspace management", allow_during_turn=True),
+        "swarm": SlashCommandSpec("swarm", "Start a multi-agent swarm", allow_during_turn=True),
+        "swarm-stop": SlashCommandSpec("swarm-stop", "Stop an active swarm", allow_during_turn=True),
+        "swarm-status": SlashCommandSpec("swarm-status", "Show swarm status", allow_during_turn=True),
     }

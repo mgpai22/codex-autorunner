@@ -24,12 +24,13 @@ for the underlying dispatch/outbox/trigger-mode specifications.
 9. [Activity Feed & Notifications](#9-activity-feed--notifications)
 10. [Alerts (Role Pings)](#10-alerts-role-pings)
 11. [Triage & Navigation Commands](#11-triage--navigation-commands)
-12. [Bot Presence](#12-bot-presence)
-13. [Reconciliation / Self-Healing](#13-reconciliation--self-healing)
-14. [State Store (Schema v2)](#14-state-store-schema-v2)
-15. [Module Map](#15-module-map)
-16. [Discord Platform Limits](#16-discord-platform-limits)
-17. [Troubleshooting](#17-troubleshooting)
+12. [Multi-Agent Swarms (`/swarm`)](#12-multi-agent-swarms-swarm)
+13. [Bot Presence](#13-bot-presence)
+14. [Reconciliation / Self-Healing](#14-reconciliation--self-healing)
+15. [State Store (Schema v3)](#15-state-store-schema-v3)
+16. [Module Map](#16-module-map)
+17. [Discord Platform Limits](#17-discord-platform-limits)
+18. [Troubleshooting](#18-troubleshooting)
 
 ---
 
@@ -73,7 +74,7 @@ Target server structure after `/setup`:
 ## 2. Configuration
 
 All swarm surface config lives under `discord_bot` in `codex-autorunner.yml`.
-Three new sections were added: `scaffold`, `rbac`, and `alerts`.
+Four sections control the swarm surface: `scaffold`, `rbac`, `alerts`, and `swarm`.
 
 ### 2.1 Scaffold Config
 
@@ -96,6 +97,7 @@ discord_bot:
       - failed
       - timeout
       - stopped
+      - swarm
       - p0
       - p1
       - p2
@@ -154,7 +156,24 @@ discord_bot:
 
 **Dataclass**: `DiscordAlertConfig` (`config.py:176`)
 
-### 2.4 Optional Channel Overrides
+### 2.4 Swarm Config
+
+Controls the multi-agent swarm system (`/swarm` commands). See
+[Section 12](#12-multi-agent-swarms-swarm) for full details.
+
+```yaml
+discord_bot:
+  swarm:
+    enabled: true
+    max_agents: 6
+    claude_binary: "claude"
+    poll_interval_seconds: 0.5
+    swarm_timeout_seconds: 7200.0
+```
+
+**Dataclass**: `SwarmConfig` in `config.py:178`
+
+### 2.5 Optional Channel Overrides
 
 For pre-existing channels (skip `/setup`):
 
@@ -669,10 +688,233 @@ All new commands are registered in `commands_spec.py`:
 | `/workspace` | yes | Workspace management (create, clone) |
 | `/workspaces` | yes | List scaffolded workspaces |
 | `/tasks` | yes | Task triage and navigation |
+| `/swarm` | yes | Start a multi-agent swarm |
+| `/swarm-stop` | yes | Stop an active swarm |
+| `/swarm-status` | yes | Show swarm status |
 
 ---
 
-## 12. Bot Presence
+## 12. Multi-Agent Swarms (`/swarm`)
+
+The swarm system spawns multiple Claude CLI agents that collaborate via a
+filesystem-based teammate protocol. Each agent gets its own Discord forum
+thread for observability. The protocol is modeled after
+[claude-code-controller](https://github.com/The-Vibe-Company/claude-code-controller).
+
+### 12.1 Architecture
+
+```
+Discord User
+    │
+    ▼  /swarm prompt:... preset:full-build
+┌──────────────────┐
+│  SwarmCommands    │  (slash command handler)
+│  (mixin)         │
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│  SwarmManager    │  (Discord bridge — forum threads, message routing, health)
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│ SwarmController  │  (process management — spawn, message, shutdown, kill)
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│    Protocol      │  (filesystem I/O — team config, inboxes, tasks)
+│  ~/.claude/teams │
+│  ~/.claude/tasks │
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│  Claude CLI      │  N agents in --teammate-mode auto
+│  (PTY wrapper)   │
+└──────────────────┘
+```
+
+### 12.2 Teammate Protocol (Filesystem)
+
+All agent coordination uses files under `~/.claude/`:
+
+| Path | Purpose |
+|---|---|
+| `~/.claude/teams/{teamName}/config.json` | Team configuration (members, lead, description) |
+| `~/.claude/teams/{teamName}/inboxes/{agentName}.json` | Per-agent inbox (messages array) |
+| `~/.claude/tasks/{teamName}/{id}.json` | Per-task state file |
+
+File operations use `fcntl.flock()` with 5 retries and 50–500ms exponential
+backoff. All async I/O is bridged through a `ThreadPoolExecutor(max_workers=1)`,
+matching the `state.py` pattern.
+
+**Data structures** (matching claude-code-controller):
+
+- **TeamConfig**: `{name, description, createdAt, leadAgentId, leadSessionId, members[]}`
+- **TeamMember**: `{agentId, name, agentType, model, joinedAt, tmuxPaneId, cwd}`
+- **InboxMessage**: `{from, text, timestamp, summary, read}`
+- **TaskFile**: `{id, subject, description, activeForm, owner, status, blocks, blockedBy, metadata}`
+
+**Environment variable**: `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` is set on all
+spawned agents.
+
+**Implementation**: `swarm/protocol.py`
+
+### 12.3 Process Management (SwarmController)
+
+`SwarmController` manages agent processes:
+
+- **Spawn**: Uses a Python PTY wrapper (`pty.fork()`) via `subprocess.Popen` with
+  `os.setsid()` for process group cleanup. Command:
+  ```
+  claude --teammate-mode auto \
+    --agent-id {name}@{team} --agent-name {name} \
+    --team-name {team} --agent-type {type} \
+    --model {model} --permission-mode bypassPermissions \
+    --parent-session-id {uuid} -p "{prompt}"
+  ```
+- **Message**: Writes to agent inbox file, agent reads on next poll
+- **Shutdown**: Writes `shutdown_request` to inbox → waits grace period → SIGTERM → SIGKILL
+- **Polling**: Background `asyncio.Task` reads the controller's own inbox at
+  configurable interval (default 0.5s)
+
+**Implementation**: `swarm/controller.py`
+
+### 12.4 Presets
+
+Three built-in presets define agent compositions:
+
+| Preset | Agents | Description |
+|---|---|---|
+| `code-review` | lead (opus), security-reviewer (sonnet), quality-reviewer (sonnet) | 3-agent code review |
+| `full-build` | lead (opus), architect (opus), implementer (sonnet), tester (sonnet) | 4-agent full build |
+| `research-deep` | lead (opus), researcher-1 (sonnet), researcher-2 (sonnet) | 3-agent deep research |
+
+Custom presets can be defined in YAML config under `discord_bot.swarm.custom_presets`.
+Custom presets take precedence over built-ins with the same name.
+
+**Models**: `claude-opus-4-6` for leads/architects, `claude-sonnet-4-5-20250929`
+for workers.
+
+**Implementation**: `swarm/presets.py`
+
+### 12.5 Commands
+
+#### `/swarm prompt:<text> preset:<name>`
+
+Start a multi-agent swarm.
+
+| Parameter | Required | Default | Description |
+|-----------|----------|---------|-------------|
+| `prompt` | yes | — | The objective for the swarm |
+| `preset` | no | `code-review` | Preset name (autocomplete from built-in + custom) |
+
+**RBAC capability**: `can_run`
+
+**Flow**:
+1. RBAC check + verify swarm is enabled in config
+2. Resolve workspace from channel binding
+3. Find the tasks forum channel for this workspace from `discord_scaffolded_channels`
+4. Initialize `SwarmManager` (lazy)
+5. `SwarmManager.start_swarm()`:
+   - Generate `swarm_id` (UUID) and `team_name` (`swarm-{id[:8]}`)
+   - Create `SwarmController` → initialize filesystem dirs + config.json
+   - For each role in the preset → create forum thread with agent card embed + `swarm` tag
+   - Spawn each agent via PTY wrapper
+   - Register message callback → start inbox polling + health monitor
+   - Save swarm + agents to SQLite
+6. Post summary embed with swarm status
+
+#### `/swarm-stop [swarm_id]`
+
+Stop an active swarm. If no `swarm_id` given, stops all active swarms.
+
+**RBAC capability**: `can_stop`
+
+**Shutdown flow**:
+1. Mark swarm status → `stopping`
+2. Send `shutdown_request` to each running agent's inbox
+3. Wait `shutdown_grace_seconds` (default 10s)
+4. Stop inbox polling + kill all remaining processes
+5. Cancel health monitor task
+6. Clean up filesystem (`~/.claude/teams/{team}/` + `~/.claude/tasks/{team}/`)
+7. Mark swarm status → `stopped`
+
+#### `/swarm-status [swarm_id]`
+
+Show swarm status. If no `swarm_id` given, shows the most recent swarm for
+the guild.
+
+**Output**: Embed with swarm status, preset, creation time, and per-agent
+status (name, role, model, status icon).
+
+### 12.6 Discord Integration
+
+- **Forum threads**: Each agent gets its own forum thread in the workspace's
+  tasks forum, named `[swarm] {agent_name} — {swarm_id[:8]}`
+- **Forum tag**: The `swarm` tag is applied to all swarm threads (added to the
+  default `task_forum_tags` set)
+- **Message routing**: Agent messages are polled from the controller inbox and
+  posted to the agent's forum thread via `thread.send()`
+- **Structured messages**: `idle_notification` and `shutdown_approved` messages
+  update agent status in SQLite silently; `task_completed` messages extract the
+  summary text
+- **Stop button**: Swarm callbacks route `swarm:stop:{swarm_id}` custom IDs to
+  `SwarmManager.stop_swarm()`
+
+### 12.7 Health Monitoring
+
+A background `asyncio.Task` per swarm checks health every
+`health_check_interval_seconds` (default 5s):
+
+| Check | Action |
+|---|---|
+| Swarm-level timeout exceeded (`swarm_timeout_seconds`, default 2h) | Stop the swarm |
+| All agents have exited | Mark swarm `completed`, clean up session |
+| Individual agent exited with code 0 | Mark agent `completed` |
+| Individual agent exited with non-zero code | Mark agent `failed` |
+
+### 12.8 Configuration
+
+```yaml
+discord_bot:
+  swarm:
+    enabled: true                          # Enable /swarm commands (default: true)
+    max_agents: 6                          # Max agents per swarm (default: 6)
+    default_lead_model: "claude-opus-4-6"
+    default_worker_model: "claude-sonnet-4-5-20250929"
+    claude_binary: "claude"                # Path to Claude CLI binary
+    poll_interval_seconds: 0.5             # Inbox poll interval
+    agent_timeout_seconds: 3600.0          # Per-agent timeout (1h)
+    swarm_timeout_seconds: 7200.0          # Per-swarm timeout (2h)
+    health_check_interval_seconds: 5.0     # Health check interval
+    shutdown_grace_seconds: 10.0           # Grace period before SIGKILL
+    custom_presets:                         # Custom preset definitions (optional)
+      my-preset:
+        description: "Custom 2-agent preset"
+        roles:
+          - name: lead
+            model: claude-opus-4-6
+            is_lead: true
+            prompt_template: "You are the lead. {prompt}"
+          - name: worker
+            model: claude-sonnet-4-5-20250929
+            prompt_template: "You are the worker. {prompt}"
+```
+
+**Dataclass**: `SwarmConfig` in `config.py:178`
+
+### 12.9 Swarm Embeds
+
+| Embed | Builder | Used By |
+|---|---|---|
+| Swarm summary | `build_swarm_summary_embed()` | `/swarm` response |
+| Agent card | `build_swarm_agent_card_embed()` | Forum thread starter message |
+| Swarm status | `build_swarm_status_embed()` | `/swarm-status` response |
+
+All swarm embeds use `EMBED_COLOR_SWARM = 0x9B59B6` (purple).
+
+---
+
+## 13. Bot Presence
 
 Dynamic bot status reflecting swarm activity.
 
@@ -692,7 +934,7 @@ Called on:
 
 ---
 
-## 13. Reconciliation / Self-Healing
+## 14. Reconciliation / Self-Healing
 
 On `on_ready()`, the bot runs a reconciliation pass to ensure the control surface
 is intact after restarts, manual edits, or partial failures.
@@ -707,6 +949,7 @@ is intact after restarts, manual edits, or partial failures.
 | Forum tags on tasks forums | Recreate missing tags via `_ensure_forum_tags()` |
 | Dashboard pinned message | Recreate via `_ensure_dashboard()` |
 | Task Card persistent views | Re-register via `_reregister_task_card_views()` |
+| Stale swarms (status="running") | Mark as `stopped` — Claude CLI processes don't survive bot restarts |
 
 ### Structured log events
 
@@ -716,16 +959,16 @@ is intact after restarts, manual edits, or partial failures.
 | `discord.reconcile.tag_recreated` | A forum tag was recreated |
 | `discord.reconcile.dashboard_recreated` | Dashboard message was recreated |
 | `discord.reconcile.guild_failed` | Guild-level reconcile error |
+| `discord.swarm.stale_marked_stopped` | A running swarm was marked stopped after restart |
 
 ---
 
-## 14. State Store (Schema v2)
+## 15. State Store (Schema v3)
 
-Schema version bumped from 1 to 2 (`DISCORD_SCHEMA_VERSION = 2` in `state.py`).
-Six new tables were added. All use `CREATE TABLE IF NOT EXISTS` for safe
-migration.
+Schema version bumped to 3 (`DISCORD_SCHEMA_VERSION = 3` in `state.py`).
+Eight tables total. All use `CREATE TABLE IF NOT EXISTS` for safe migration.
 
-### New tables
+### Tables
 
 #### `discord_scaffolded_channels`
 
@@ -835,6 +1078,55 @@ CREATE TABLE IF NOT EXISTS discord_dashboard (
 
 **CRUD**: `save_dashboard`, `get_dashboard`, `update_dashboard_timestamp`
 
+#### `discord_swarms`
+
+Tracks swarm sessions (added in Schema v3).
+
+```sql
+CREATE TABLE IF NOT EXISTS discord_swarms (
+    swarm_id TEXT PRIMARY KEY,
+    guild_id INTEGER NOT NULL,
+    workspace_id TEXT NOT NULL,
+    workspace_path TEXT NOT NULL,
+    forum_channel_id INTEGER NOT NULL,
+    team_name TEXT NOT NULL,
+    preset_name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    user_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'starting',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    data TEXT
+);
+```
+
+**CRUD**: `save_swarm`, `get_swarm`, `list_swarms` (by guild/status), `update_swarm_status`, `delete_swarm`
+
+#### `discord_swarm_agents`
+
+Per-agent state within a swarm (added in Schema v3).
+
+```sql
+CREATE TABLE IF NOT EXISTS discord_swarm_agents (
+    swarm_id TEXT NOT NULL REFERENCES discord_swarms(swarm_id) ON DELETE CASCADE,
+    agent_name TEXT NOT NULL,
+    agent_id TEXT NOT NULL,
+    role_name TEXT NOT NULL,
+    model TEXT,
+    is_lead INTEGER NOT NULL DEFAULT 0,
+    discord_thread_id INTEGER,
+    discord_root_message_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'spawning',
+    pid INTEGER,
+    started_at TEXT,
+    finished_at TEXT,
+    last_message_at TEXT,
+    PRIMARY KEY (swarm_id, agent_name)
+);
+```
+
+**CRUD**: `save_swarm_agent`, `update_swarm_agent_status`, `list_swarm_agents`
+
 ### Async/sync bridge pattern
 
 All state methods follow the existing pattern:
@@ -846,7 +1138,7 @@ The single-threaded executor ensures SQLite thread-safety.
 
 ---
 
-## 15. Module Map
+## 16. Module Map
 
 ### New files
 
@@ -854,26 +1146,33 @@ The single-threaded executor ensures SQLite thread-safety.
 |---|---|---|
 | `handlers/commands/scaffold.py` | ~550 | `ScaffoldCommands` mixin — `/setup` implementation |
 | `handlers/commands/workspace_create.py` | ~750 | `WorkspaceCreateCommands` mixin — `/workspace create` and `/workspace clone` |
+| `handlers/commands/swarm_commands.py` | ~245 | `SwarmCommands` mixin — `/swarm`, `/swarm-stop`, `/swarm-status` |
 | `handlers/tasks.py` | ~740 | `DiscordTasksMixin` — task cards, controls, triage commands |
 | `handlers/rbac.py` | ~165 | `DiscordRBACMixin` — role-based access control |
 | `handlers/dashboard.py` | ~300 | `DiscordDashboardMixin` — live dashboard |
 | `handlers/agent_bus.py` | ~310 | `DiscordAgentBusMixin` — agent bus + lifecycle bridge |
+| `swarm/__init__.py` | 1 | Package init |
+| `swarm/types.py` | ~97 | `SwarmAgentState`, `SwarmAgentRole`, `SwarmPreset`, `SwarmAgentInfo`, `SwarmSession` |
+| `swarm/presets.py` | ~170 | `SWARM_PRESETS` dict, `get_preset()`, `list_presets()`, custom preset parsing |
+| `swarm/protocol.py` | ~468 | Filesystem teammate protocol — team config, inbox, tasks, file locking |
+| `swarm/controller.py` | ~368 | `SwarmController` — PTY spawn, message send, polling, shutdown, kill |
+| `swarm/manager.py` | ~462 | `SwarmManager` — Discord bridge, forum threads, message routing, health monitoring |
 
 ### Modified files
 
 | File | Changes |
 |---|---|
-| `config.py` | +`DiscordScaffoldConfig`, `DiscordRoleTier`, `DiscordRBACConfig`, `DiscordAlertConfig`; parsing in `from_raw()`; new fields on `DiscordBotConfig` |
-| `state.py` | 6 new tables in `_ensure_schema()`; full async/sync CRUD pairs; `DISCORD_SCHEMA_VERSION` → 2 |
-| `service.py` | 5 new mixins in class hierarchy; `_update_presence()`, `_reconcile_on_ready()`, `_reconcile_guild()`, `_reconcile_dashboard()`, `_reregister_task_card_views()`; lifecycle listener registration in `on_ready()` |
-| `rendering.py` | 7 new embed builders: `build_setup_summary_embed`, `build_task_card_embed`, `build_tasks_list_embed`, `build_workspaces_embed`, `build_dashboard_embed`, `build_agent_bus_embed`, `build_handoff_embed` |
+| `config.py` | +`DiscordScaffoldConfig`, `DiscordRoleTier`, `DiscordRBACConfig`, `DiscordAlertConfig`, `SwarmConfig`; parsing in `from_raw()`; new fields on `DiscordBotConfig`; "swarm" added to default `task_forum_tags` |
+| `state.py` | 8 tables in `_ensure_schema()`; full async/sync CRUD pairs; `DISCORD_SCHEMA_VERSION` → 3; swarm + swarm_agents tables |
+| `service.py` | 6 new mixins in class hierarchy (incl. `SwarmCommands`); `_swarm_manager` attribute; swarm cleanup in `_shutdown()`; stale swarm recovery in `_reconcile_on_ready()` |
+| `rendering.py` | 10 embed builders (added `build_swarm_summary_embed`, `build_swarm_agent_card_embed`, `build_swarm_status_embed`) |
 | `notifications.py` | `_post_task_activity()`, `_maybe_send_task_alert()`, `_note_task_needs_approval()`, `_post_lifecycle_to_agent_bus()` |
 | `handlers/commands/execution.py` | `/run` creates forum tasks when in scaffolded forum; state transitions wired (running, done, timeout, stopped, failed) |
-| `handlers/commands_runtime.py` | `/setup`, `/workspace create`, `/workspace clone`, `/workspaces`, `/tasks list`, `/tasks mine` registered |
-| `handlers/commands_spec.py` | New command specs (setup, workspace, workspaces, tasks) |
-| `handlers/callbacks.py` | `task:*` and `wscreate:*` custom_id routing |
+| `handlers/commands_runtime.py` | `/setup`, `/workspace create`, `/workspace clone`, `/workspaces`, `/tasks list`, `/tasks mine`, `/swarm`, `/swarm-stop`, `/swarm-status` registered |
+| `handlers/commands_spec.py` | Command specs: setup, workspace, workspaces, tasks, swarm, swarm-stop, swarm-status |
+| `handlers/callbacks.py` | `task:*`, `wscreate:*`, and `swarm:*` custom_id routing |
 | `helpers.py` | `sanitize_thread_name()` |
-| `constants.py` | `THREAD_NAME_MAX_LEN = 100` |
+| `constants.py` | `THREAD_NAME_MAX_LEN = 100`; swarm constants (`SWARM_MAX_AGENTS`, `SWARM_POLL_INTERVAL_SECONDS`, etc.); `EMBED_COLOR_SWARM = 0x9B59B6` |
 
 ### Updated mixin list
 
@@ -889,26 +1188,27 @@ class DiscordBotService(
     SharedHelpers,
     ExecutionCommands,
     WorkspaceCommands,
-    WorkspaceCreateCommands,   # NEW — /workspace create, /workspace clone
+    WorkspaceCreateCommands,   # /workspace create, /workspace clone
     FormattingHelpers,
-    ScaffoldCommands,          # NEW — /setup
-    DiscordRBACMixin,          # NEW — role-based access
-    DiscordAgentBusMixin,      # NEW — agent bus + lifecycle bridge
-    DiscordDashboardMixin,     # NEW — live dashboard
-    DiscordTasksMixin,         # NEW — forum tasks + triage
+    ScaffoldCommands,          # /setup
+    SwarmCommands,             # /swarm, /swarm-stop, /swarm-status
+    DiscordRBACMixin,          # role-based access
+    DiscordAgentBusMixin,      # agent bus + lifecycle bridge
+    DiscordDashboardMixin,     # live dashboard
+    DiscordTasksMixin,         # forum tasks + triage
 ):
 ```
 
 ---
 
-## 16. Discord Platform Limits
+## 17. Discord Platform Limits
 
 Key limits relevant to the swarm surface:
 
 | Limit | Value | Mitigation |
 |---|---|---|
 | Channel creation rate | ~10 per 10 min | `/setup` sleeps 0.5s between creates; reconcile handles gaps |
-| Forum tags per channel | 20 | Default tag set is 11; leaves room for custom tags |
+| Forum tags per channel | 20 | Default tag set is 12 (incl. "swarm"); leaves room for custom tags |
 | Applied tags per thread | 5 | State tag + priority tag; older tags trimmed |
 | Thread name length | 100 chars | `sanitize_thread_name()` truncates |
 | Webhooks per channel | 15 | 3 agent identities well under limit |
@@ -920,7 +1220,7 @@ Key limits relevant to the swarm surface:
 
 ---
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 ### `/setup` creates duplicate categories
 
@@ -962,6 +1262,33 @@ Check:
 
 Enable debug logging and look for `discord.rbac.denied` events. These include
 the `capability`, `tier`, `guild_id`, and `user_id` to identify the mismatch.
+
+### `/swarm` says "No workspace bound to this channel"
+
+The `/swarm` command requires the channel to have a workspace binding. Either:
+- Run `/swarm` from a scaffolded `tasks` forum channel (auto-bound by `/setup`)
+- Or use `/bind` to bind the current channel to a workspace first
+
+### Swarm agents don't produce output in forum threads
+
+Check:
+1. Claude CLI is installed and accessible at the configured `claude_binary` path
+2. The `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` env var is being set (check
+   `SwarmController.spawn_agent()` logs)
+3. Look for `discord.swarm.start_failed` or process spawn errors in logs
+4. Verify `poll_interval_seconds` is reasonable (default 0.5s)
+
+### Swarm shows "running" after bot restart
+
+This is expected. On restart, `_reconcile_on_ready()` marks any swarms with
+status `running` as `stopped`, since Claude CLI processes don't survive bot
+restarts. Use `/swarm` to start a new swarm.
+
+### Swarm times out
+
+The default `swarm_timeout_seconds` is 7200s (2 hours). For long-running
+swarms, increase this in config. Individual agents timeout at
+`agent_timeout_seconds` (default 3600s / 1 hour).
 
 ---
 

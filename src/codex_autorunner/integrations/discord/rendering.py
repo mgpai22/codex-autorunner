@@ -579,6 +579,116 @@ def build_handoff_embed(
     )
 
 
+def build_swarm_summary_embed(
+    session: dict[str, Any],
+    agents: Sequence[dict[str, Any]],
+) -> "discord.Embed":
+    """Build a summary embed for a swarm session."""
+    from .constants import EMBED_COLOR_SWARM
+
+    status = session.get("status", "unknown")
+    preset = session.get("preset_name", "custom")
+    prompt = session.get("prompt", "")
+
+    title = f"Swarm \u2022 {preset}"
+    description = _truncate(prompt, DISCORD_EMBED_DESC_LIMIT - 200) if prompt else "(no prompt)"
+
+    embed = discord.Embed(
+        title=_truncate(title, DISCORD_EMBED_TITLE_LIMIT),
+        description=description,
+        color=EMBED_COLOR_SWARM,
+    )
+
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="Agents", value=str(len(agents)), inline=True)
+    embed.add_field(name="Preset", value=preset, inline=True)
+
+    if session.get("swarm_id"):
+        embed.set_footer(text=f"swarm:{session['swarm_id'][:8]}")
+
+    return embed
+
+
+def build_swarm_agent_card_embed(
+    agent_info: dict[str, Any],
+    role: Optional[dict[str, Any]] = None,
+) -> "discord.Embed":
+    """Build a per-agent status card embed."""
+    from .constants import EMBED_COLOR_SWARM
+
+    agent_name = agent_info.get("agent_name", "agent")
+    role_name = agent_info.get("role_name", "worker")
+    model = agent_info.get("model", "unknown")
+    status = agent_info.get("status", "spawning")
+    is_lead = agent_info.get("is_lead", False)
+
+    title = f"{'Lead' if is_lead else 'Worker'}: {agent_name}"
+
+    embed = discord.Embed(
+        title=_truncate(title, DISCORD_EMBED_TITLE_LIMIT),
+        color=EMBED_COLOR_SWARM,
+    )
+
+    embed.add_field(name="Role", value=role_name, inline=True)
+    embed.add_field(name="Model", value=model, inline=True)
+    embed.add_field(name="Status", value=status, inline=True)
+
+    if role and role.get("prompt_template"):
+        embed.add_field(
+            name="Prompt Template",
+            value=_truncate(role["prompt_template"], DISCORD_EMBED_FIELD_VALUE_LIMIT),
+            inline=False,
+        )
+
+    return embed
+
+
+def build_swarm_status_embed(
+    session: dict[str, Any],
+    agents: Sequence[dict[str, Any]],
+) -> "discord.Embed":
+    """Build a status display for /swarm-status."""
+    from .constants import EMBED_COLOR_SWARM
+
+    status = session.get("status", "unknown")
+    preset = session.get("preset_name", "custom")
+    swarm_id = session.get("swarm_id", "")
+
+    title = f"Swarm Status \u2022 {swarm_id[:8]}"
+
+    status_icon = STATUS_ICONS.get(
+        "done" if status == "completed" else "fail" if status == "failed" else "running",
+        STATUS_ICONS["running"],
+    )
+
+    lines: list[str] = [f"{status_icon} **{status}** \u2022 Preset: {preset}"]
+
+    for agent in agents:
+        a_name = agent.get("agent_name", "?")
+        a_status = agent.get("status", "unknown")
+        a_role = agent.get("role_name", "worker")
+        a_is_lead = agent.get("is_lead") or agent.get("is_lead", 0)
+        lead_marker = " (lead)" if a_is_lead else ""
+        a_icon = STATUS_ICONS.get(
+            "done" if a_status in ("completed", "idle") else "fail" if a_status == "failed" else "running",
+            STATUS_ICONS["running"],
+        )
+        lines.append(f"{a_icon} **{a_name}**{lead_marker} \u2014 {a_role} \u2014 {a_status}")
+
+    description = "\n".join(lines)
+
+    embed = discord.Embed(
+        title=_truncate(title, DISCORD_EMBED_TITLE_LIMIT),
+        description=_truncate(description, DISCORD_EMBED_DESC_LIMIT),
+        color=EMBED_COLOR_SWARM,
+    )
+
+    if session.get("created_at"):
+        embed.set_footer(text=f"Started: {session['created_at']}")
+
+    return embed
+
+
 def markdown_to_discord(text: str) -> str:
     """Convert text that may contain Telegram HTML to Discord-compatible markdown.
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -141,6 +141,7 @@ class DiscordScaffoldConfig:
         "failed",
         "timeout",
         "stopped",
+        "swarm",
         "p0",
         "p1",
         "p2",
@@ -171,6 +172,21 @@ class DiscordRBACConfig:
     use_default_member_permissions: bool = True
     tiers: tuple[DiscordRoleTier, ...] = ()
     default_tier: str = "viewer"
+
+
+@dataclass(frozen=True)
+class SwarmConfig:
+    enabled: bool = True
+    max_agents: int = 6
+    default_lead_model: str = "claude-opus-4-6"
+    default_worker_model: str = "claude-sonnet-4-5-20250929"
+    claude_binary: str = "claude"
+    poll_interval_seconds: float = 0.5
+    agent_timeout_seconds: float = 3600.0
+    swarm_timeout_seconds: float = 7200.0
+    health_check_interval_seconds: float = 5.0
+    shutdown_grace_seconds: float = 10.0
+    custom_presets: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -278,6 +294,7 @@ class DiscordBotConfig:
     ticket_flow_auto_resume: bool
     pause_dispatch_notifications: PauseDispatchNotifications
     default_notification_channel_id: Optional[int]
+    swarm: SwarmConfig = field(default_factory=SwarmConfig)
     dashboard_channel_id: Optional[int] = None
     agent_bus_channel_id: Optional[int] = None
 
@@ -741,6 +758,63 @@ class DiscordBotConfig:
             except (TypeError, ValueError):
                 default_notification_channel_id = None
 
+        # Swarm
+        swarm_raw_value = cfg.get("swarm")
+        swarm_raw: dict[str, Any] = (
+            swarm_raw_value if isinstance(swarm_raw_value, dict) else {}
+        )
+        swarm_enabled = bool(swarm_raw.get("enabled", True))
+        swarm_max_agents = int(swarm_raw.get("max_agents", 6))
+        if swarm_max_agents <= 0:
+            swarm_max_agents = 6
+        swarm_default_lead_model = str(
+            swarm_raw.get("default_lead_model", "claude-opus-4-6")
+        ).strip()
+        if not swarm_default_lead_model:
+            swarm_default_lead_model = "claude-opus-4-6"
+        swarm_default_worker_model = str(
+            swarm_raw.get("default_worker_model", "claude-sonnet-4-5-20250929")
+        ).strip()
+        if not swarm_default_worker_model:
+            swarm_default_worker_model = "claude-sonnet-4-5-20250929"
+        swarm_claude_binary = str(swarm_raw.get("claude_binary", "claude")).strip()
+        if not swarm_claude_binary:
+            swarm_claude_binary = "claude"
+        swarm_poll_interval = _positive_float(
+            swarm_raw.get("poll_interval_seconds"), 0.5
+        )
+        swarm_agent_timeout = _positive_float(
+            swarm_raw.get("agent_timeout_seconds"), 3600.0
+        )
+        swarm_timeout = _positive_float(
+            swarm_raw.get("swarm_timeout_seconds"), 7200.0
+        )
+        swarm_health_check = _positive_float(
+            swarm_raw.get("health_check_interval_seconds"), 5.0
+        )
+        swarm_shutdown_grace = _positive_float(
+            swarm_raw.get("shutdown_grace_seconds"), 10.0
+        )
+        swarm_custom_presets_raw = swarm_raw.get("custom_presets")
+        swarm_custom_presets: dict[str, Any] = (
+            dict(swarm_custom_presets_raw)
+            if isinstance(swarm_custom_presets_raw, dict)
+            else {}
+        )
+        swarm_config = SwarmConfig(
+            enabled=swarm_enabled,
+            max_agents=swarm_max_agents,
+            default_lead_model=swarm_default_lead_model,
+            default_worker_model=swarm_default_worker_model,
+            claude_binary=swarm_claude_binary,
+            poll_interval_seconds=swarm_poll_interval,
+            agent_timeout_seconds=swarm_agent_timeout,
+            swarm_timeout_seconds=swarm_timeout,
+            health_check_interval_seconds=swarm_health_check,
+            shutdown_grace_seconds=swarm_shutdown_grace,
+            custom_presets=swarm_custom_presets,
+        )
+
         # Dashboard & agent bus channels
         dashboard_channel_raw = cfg.get("dashboard_channel_id")
         dashboard_channel_id: Optional[int] = None
@@ -885,6 +959,7 @@ class DiscordBotConfig:
             message_overflow=message_overflow,
             metrics_mode=metrics_mode,
             coalesce_window_seconds=coalesce_window_seconds,
+            swarm=swarm_config,
             agent_binaries=agent_binaries,
             opencode_command=opencode_command,
             ticket_flow_auto_resume=ticket_flow_auto_resume,

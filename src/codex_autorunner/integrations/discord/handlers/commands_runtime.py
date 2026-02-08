@@ -218,6 +218,56 @@ class DiscordCommandHandlers:
 
         tree.add_command(workspace_group)
 
+        # ---- Swarm commands ----
+
+        @tree.command(name="swarm", description="Start a multi-agent swarm")
+        @app_commands.describe(
+            prompt="The task for the swarm to work on",
+            preset="Swarm preset (default: code-review)",
+        )
+        async def cmd_swarm(
+            interaction: discord.Interaction,
+            prompt: str,
+            preset: Optional[str] = "code-review",
+        ) -> None:
+            await interaction.response.defer()
+            await self._cmd_swarm_impl(interaction, prompt, preset=preset or "code-review")
+
+        @cmd_swarm.autocomplete("preset")
+        async def swarm_preset_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            from ..swarm.presets import list_presets
+
+            swarm_config = self._config.swarm
+            presets = list_presets(swarm_config.custom_presets)
+            choices = [
+                app_commands.Choice(name=f"{name} — {p.description}", value=name)
+                for name, p in presets.items()
+            ]
+            if current:
+                lower = current.lower()
+                choices = [c for c in choices if lower in c.name.lower() or lower in c.value.lower()]
+            return choices[:25]
+
+        @tree.command(name="swarm-stop", description="Stop an active swarm")
+        @app_commands.describe(swarm_id="Swarm ID to stop (optional, stops all if omitted)")
+        async def cmd_swarm_stop(
+            interaction: discord.Interaction,
+            swarm_id: Optional[str] = None,
+        ) -> None:
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_swarm_stop_impl(interaction, swarm_id)
+
+        @tree.command(name="swarm-status", description="Show swarm status")
+        @app_commands.describe(swarm_id="Swarm ID to check (optional, shows latest)")
+        async def cmd_swarm_status(
+            interaction: discord.Interaction,
+            swarm_id: Optional[str] = None,
+        ) -> None:
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_swarm_status_impl(interaction, swarm_id)
+
         log_event(
             self._logger,
             logging.INFO,
