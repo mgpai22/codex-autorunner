@@ -371,7 +371,7 @@ class ScaffoldCommands:
                 _discord.ForumTag(name=name)
                 for name in self._config.scaffold.task_forum_tags
             ]
-            tasks_channel = await category.create_forum_channel(
+            tasks_channel = await category.create_forum(
                 channel_name, available_tags=forum_tags
             )
 
@@ -443,7 +443,10 @@ class ScaffoldCommands:
             except Exception:
                 pass
 
-        channel = await category.create_text_channel(channel_name, overwrites=overwrites)
+        kwargs: dict[str, Any] = {}
+        if overwrites is not None:
+            kwargs["overwrites"] = overwrites
+        channel = await category.create_text_channel(channel_name, **kwargs)
         await asyncio.sleep(_SCAFFOLD_SLEEP_SECONDS)
         await self._store.save_scaffolded_channel(
             guild_id, workspace_id, channel_type, channel.id

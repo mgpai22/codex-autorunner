@@ -37,8 +37,8 @@ class DiscordCommandHandlers:
         @tree.command(
             name="setup",
             description="Scaffold swarm control surface channels",
-            default_member_permissions=discord.Permissions(administrator=True),
         )
+        @app_commands.default_permissions(administrator=True)
         async def cmd_setup(interaction: discord.Interaction) -> None:
             if hasattr(self, "_check_rbac"):
                 allowed = await self._check_rbac(interaction, "can_setup")  # type: ignore[attr-defined]
