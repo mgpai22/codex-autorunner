@@ -87,6 +87,7 @@ class DiscordMessageTransport:
         *,
         embed: Optional[Any] = None,
         view: Optional[Any] = None,
+        clear_embeds: bool = False,
     ) -> bool:
         """Edit an existing message. Returns True on success."""
         try:
@@ -101,6 +102,8 @@ class DiscordMessageTransport:
                 kwargs["content"] = text[:DISCORD_MAX_MESSAGE_LENGTH]
             if embed is not None:
                 kwargs["embed"] = embed
+            elif clear_embeds:
+                kwargs["embeds"] = []
             if view is not None:
                 kwargs["view"] = view
             await msg.edit(**kwargs)
@@ -194,7 +197,10 @@ class DiscordMessageTransport:
         strategy = choose_overflow_strategy(response, self._config.message_overflow)
 
         if strategy == "plain" and placeholder_id:
-            ok = await self._edit_message(target_id, placeholder_id, response)
+            # Clear any progress embed left on the placeholder.
+            ok = await self._edit_message(
+                target_id, placeholder_id, response, clear_embeds=True
+            )
             return placeholder_id if ok else None
 
         # Delete placeholder if we'll send a new message

@@ -42,18 +42,14 @@ def build_status_embed(
 ) -> "discord.Embed":
     """Build a status embed showing current workspace/agent/model configuration."""
     embed = discord.Embed(title="Status", color=EMBED_COLOR_INFO)
-    if workspace:
-        embed.add_field(
-            name="Workspace",
-            value=_truncate(workspace, DISCORD_EMBED_FIELD_VALUE_LIMIT),
-            inline=True,
-        )
-    if agent:
-        embed.add_field(name="Agent", value=agent, inline=True)
-    if model:
-        embed.add_field(name="Model", value=model, inline=True)
-    if approval_mode:
-        embed.add_field(name="Approval Mode", value=approval_mode, inline=True)
+    embed.add_field(
+        name="Workspace",
+        value=_truncate(workspace, DISCORD_EMBED_FIELD_VALUE_LIMIT) if workspace else "_Not bound — use `/bind <path>`_",
+        inline=True,
+    )
+    embed.add_field(name="Agent", value=agent or "_default_", inline=True)
+    embed.add_field(name="Model", value=model or "_default_", inline=True)
+    embed.add_field(name="Approval Mode", value=approval_mode or "_default_", inline=True)
     if thread_id:
         embed.add_field(name="Thread", value=_truncate(thread_id, 50), inline=True)
     return embed
