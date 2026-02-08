@@ -408,7 +408,10 @@ class ExecutionCommands:
                 exc=exc,
             )
 
-    async def _cmd_run_impl(self, interaction: Any, prompt: str) -> None:
+    async def _cmd_run_impl(
+        self, interaction: Any, prompt: str,
+        *, model: Optional[str] = None, effort: Optional[str] = None,
+    ) -> None:
         """Implementation for /run slash command."""
         import discord as _discord
 
@@ -431,6 +434,10 @@ class ExecutionCommands:
             )
             return
 
+        # Apply defaults for model and effort
+        effective_model = model or "gpt-5.3-codex"
+        effective_effort = effort or "medium"
+
         from ...helpers import build_topic_key
 
         workspace_id: Optional[str] = None
@@ -446,6 +453,9 @@ class ExecutionCommands:
             if ch_type == "tasks" and ch_id == channel_id:
                 workspace_id = ws_id
                 tasks_forum_id = ch_id
+                break
+            if ch_type == "run" and ch_id == channel_id:
+                workspace_id = ws_id
                 break
 
         # Otherwise: map the bound workspace path back to a hub repo id.
@@ -547,12 +557,21 @@ class ExecutionCommands:
                     thread_id=thread_id,
                     workspace_path=binding,
                     approval_mode=approval_mode,
+                    model=effective_model,
+                    reasoning_effort=effective_effort,
                     created_at=now_iso(),
                     updated_at=now_iso(),
                 )
                 await self._store.save_topic(topic_key, record)
             elif not record.workspace_path:
                 record.workspace_path = binding
+                record.model = effective_model
+                record.reasoning_effort = effective_effort
+                record.updated_at = now_iso()
+                await self._store.save_topic(topic_key, record)
+            else:
+                record.model = effective_model
+                record.reasoning_effort = effective_effort
                 record.updated_at = now_iso()
                 await self._store.save_topic(topic_key, record)
 
@@ -610,12 +629,21 @@ class ExecutionCommands:
                 thread_id=thread_id,
                 workspace_path=binding,
                 approval_mode=approval_mode,
+                model=effective_model,
+                reasoning_effort=effective_effort,
                 created_at=now_iso(),
                 updated_at=now_iso(),
             )
             await self._store.save_topic(topic_key, record)
         elif not record.workspace_path:
             record.workspace_path = binding
+            record.model = effective_model
+            record.reasoning_effort = effective_effort
+            record.updated_at = now_iso()
+            await self._store.save_topic(topic_key, record)
+        else:
+            record.model = effective_model
+            record.reasoning_effort = effective_effort
             record.updated_at = now_iso()
             await self._store.save_topic(topic_key, record)
 

@@ -55,9 +55,32 @@ class DiscordCommandHandlers:
             await self._cmd_setup_impl(interaction)
 
         @tree.command(name="run", description="Run an agent task")
-        @app_commands.describe(prompt="The task to run")
-        async def cmd_run(interaction: discord.Interaction, prompt: str) -> None:
-            await self._handle_slash_run(interaction, prompt)
+        @app_commands.describe(
+            prompt="The task to run",
+            model="Model to use (default: gpt-5.3-codex)",
+            effort="Reasoning effort level (default: medium)",
+        )
+        async def cmd_run(
+            interaction: discord.Interaction,
+            prompt: str,
+            model: Optional[str] = None,
+            effort: Optional[str] = None,
+        ) -> None:
+            await self._handle_slash_run(interaction, prompt, model=model, effort=effort)
+
+        @cmd_run.autocomplete("model")
+        async def run_model_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            return await self._autocomplete_model(interaction, current)
+
+        @cmd_run.autocomplete("effort")
+        async def run_effort_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            efforts = ["medium", "high", "xhigh", "low", "minimal", "none"]
+            filtered = [e for e in efforts if current.lower() in e] if current else efforts
+            return [app_commands.Choice(name=e, value=e) for e in filtered[:25]]
 
         @tree.command(name="stop", description="Stop the active task")
         async def cmd_stop(interaction: discord.Interaction) -> None:
@@ -146,6 +169,55 @@ class DiscordCommandHandlers:
 
         tree.add_command(tasks_group)
 
+        workspace_group = app_commands.Group(
+            name="workspace", description="Workspace management"
+        )
+
+        @workspace_group.command(name="create", description="Create a new workspace")
+        async def cmd_workspace_create(interaction: discord.Interaction) -> None:
+            if hasattr(self, "_check_rbac"):
+                allowed = await self._check_rbac(interaction, "can_setup")
+                if not allowed:
+                    try:
+                        await interaction.response.send_message(
+                            "You do not have permission to create workspaces.",
+                            ephemeral=True,
+                        )
+                    except Exception:
+                        pass
+                    return
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_workspace_create_impl(interaction)
+
+        @workspace_group.command(
+            name="clone",
+            description="Clone a git repository into a new workspace",
+        )
+        @app_commands.describe(
+            url="Git URL to clone (e.g. github.com/user/repo)",
+            name="Custom workspace name (optional, inferred from URL if omitted)",
+        )
+        async def cmd_workspace_clone(
+            interaction: discord.Interaction,
+            url: str,
+            name: Optional[str] = None,
+        ) -> None:
+            if hasattr(self, "_check_rbac"):
+                allowed = await self._check_rbac(interaction, "can_setup")
+                if not allowed:
+                    try:
+                        await interaction.response.send_message(
+                            "You do not have permission to create workspaces.",
+                            ephemeral=True,
+                        )
+                    except Exception:
+                        pass
+                    return
+            await interaction.response.defer(ephemeral=True)
+            await self._cmd_workspace_clone_impl(interaction, url, name)
+
+        tree.add_command(workspace_group)
+
         log_event(
             self._logger,
             logging.INFO,
@@ -157,7 +229,10 @@ class DiscordCommandHandlers:
     # Slash command handler stubs (to be implemented in command modules)
     # ------------------------------------------------------------------
 
-    async def _handle_slash_run(self, interaction: Any, prompt: str) -> None:
+    async def _handle_slash_run(
+        self, interaction: Any, prompt: str,
+        *, model: Optional[str] = None, effort: Optional[str] = None,
+    ) -> None:
         if hasattr(self, "_check_rbac"):
             allowed = await self._check_rbac(interaction, "can_run")  # type: ignore[attr-defined]
             if not allowed:
@@ -170,7 +245,7 @@ class DiscordCommandHandlers:
                     pass
                 return
         await interaction.response.defer()
-        await self._cmd_run_impl(interaction, prompt)
+        await self._cmd_run_impl(interaction, prompt, model=model, effort=effort)
 
     async def _handle_slash_stop(self, interaction: Any) -> None:
         if hasattr(self, "_check_rbac"):
