@@ -499,6 +499,7 @@ class DiscordNotificationHandlers:
         ctx: Any,
         agent: str,
         model: Optional[str],
+        effort: Optional[str] = None,
         label: str = "working",
     ) -> None:
         if not self._config.progress_stream.enabled:
@@ -510,6 +511,7 @@ class DiscordNotificationHandlers:
             agent=agent,
             model=model or "default",
             label=label,
+            effort=effort,
             max_actions=self._config.progress_stream.max_actions,
             max_output_chars=self._config.progress_stream.max_output_chars,
         )

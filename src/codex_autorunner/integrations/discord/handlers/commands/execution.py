@@ -103,7 +103,12 @@ class ExecutionCommands:
             agent = record.agent or DEFAULT_AGENT
             model = record.model or DEFAULT_AGENT_MODELS.get(agent, "default")
             await self._start_turn_progress(
-                turn_key, ctx=ctx, agent=agent, model=model, label="working"
+                turn_key,
+                ctx=ctx,
+                agent=agent,
+                model=model,
+                effort=getattr(record, "reasoning_effort", None),
+                label="working",
             )
 
             log_event(

@@ -59,6 +59,7 @@ class TurnProgressTracker:
     agent: str
     model: str
     label: str
+    effort: Optional[str] = None
     max_actions: int = COMPACT_MAX_ACTIONS
     max_output_chars: int = COMPACT_MAX_TEXT_LENGTH
     actions: list[ProgressAction] = field(default_factory=list)
@@ -135,7 +136,7 @@ class TurnProgressTracker:
 
 def render_progress_text(tracker: TurnProgressTracker) -> str:
     """Render progress as plain text (for contexts where embeds aren't appropriate)."""
-    elapsed = format_elapsed(time.time() - tracker.started_at)
+    elapsed = format_elapsed(time.monotonic() - tracker.started_at)
     lines: list[str] = []
     visible = tracker.actions[-tracker.max_actions :]
     for action in visible:
@@ -146,7 +147,8 @@ def render_progress_text(tracker: TurnProgressTracker) -> str:
         text = _truncate(action.text, tracker.max_output_chars)
         lines.append(f"{icon} {label}: {text}")
 
-    footer_parts = [tracker.agent, tracker.model, elapsed]
+    effort_label = tracker.effort or "default"
+    footer_parts = [tracker.agent, tracker.model, f"effort {effort_label}", elapsed]
     if tracker.step > 0:
         footer_parts.append(f"step {tracker.step}")
     if tracker.context_usage_percent is not None:
@@ -160,7 +162,7 @@ def render_progress_embed(tracker: TurnProgressTracker) -> Any:
     if not HAS_DISCORD:
         return None
 
-    elapsed = format_elapsed(time.time() - tracker.started_at)
+    elapsed = format_elapsed(time.monotonic() - tracker.started_at)
     color = EMBED_COLOR_SUCCESS if tracker.finalized else EMBED_COLOR_PROGRESS
 
     # Check for errors
@@ -182,7 +184,8 @@ def render_progress_embed(tracker: TurnProgressTracker) -> Any:
     description = "\n".join(lines) if lines else "Starting..."
     embed = discord.Embed(description=description[:4096], color=color)
 
-    footer_parts = [tracker.agent, tracker.model, elapsed]
+    effort_label = tracker.effort or "default"
+    footer_parts = [tracker.agent, tracker.model, f"effort {effort_label}", elapsed]
     if tracker.step > 0:
         footer_parts.append(f"step {tracker.step}")
     if tracker.context_usage_percent is not None:
