@@ -16,6 +16,7 @@ import sys
 import time
 import uuid
 from collections import deque
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Optional
 
 from ....core.utils import resolve_executable, subprocess_env
@@ -24,47 +25,7 @@ from .types import SwarmAgentState
 
 logger = logging.getLogger("codex_autorunner.integrations.discord.swarm.controller")
 
-# Python PTY wrapper script — provides a real terminal for the Claude TUI.
-# Identical to the approach used by claude-code-controller's process-manager.ts.
-_PTY_WRAPPER = r"""
-import pty, os, sys, json, signal, select
-
-cmd = json.loads(sys.argv[1])
-pid, fd = pty.fork()
-if pid == 0:
-    os.execvp(cmd[0], cmd)
-else:
-    signal.signal(signal.SIGTERM, lambda *a: (os.kill(pid, signal.SIGTERM), sys.exit(0)))
-    signal.signal(signal.SIGINT, lambda *a: (os.kill(pid, signal.SIGTERM), sys.exit(0)))
-    try:
-        while True:
-            r, _, _ = select.select([fd, 0], [], [], 1.0)
-            if fd in r:
-                try:
-                    data = os.read(fd, 4096)
-                    if not data:
-                        break
-                    os.write(1, data)
-                except OSError:
-                    break
-            if 0 in r:
-                try:
-                    data = os.read(0, 4096)
-                    if not data:
-                        break
-                    os.write(fd, data)
-                except OSError:
-                    break
-    except:
-        pass
-    finally:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except:
-            pass
-        _, status = os.waitpid(pid, 0)
-        sys.exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1)
-"""
+_PTY_WRAPPER_PATH = Path(__file__).with_name("pty_wrapper.py").resolve()
 
 MessageCallback = Callable[
     [str, dict[str, Any]], Coroutine[Any, Any, None]
@@ -204,7 +165,7 @@ class SwarmController:
         )
 
         proc = subprocess.Popen(
-            [sys.executable, "-c", _PTY_WRAPPER, cmd_json],
+            [sys.executable, str(_PTY_WRAPPER_PATH), cmd_json],
             cwd=self.cwd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
