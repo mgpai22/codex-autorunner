@@ -175,8 +175,7 @@ synced to each guild in `allowed_guild_ids` for instant availability.
 | `/bind` | `workspace: str?` | Bind channel to a workspace directory (show current if no arg) |
 | `/repos` | - | List available repositories from the hub |
 | `/status` | - | Show current workspace, agent, model, effort, approval mode |
-| `/model` | `name: str?` | Show or switch the model |
-| `/effort` | `level: str?` | Show or switch the reasoning effort (thinking level) |
+| `/model` | `name: str?`, `effort: str?` | Show or switch the model (and optionally the reasoning effort / thinking level) |
 | `/agent` | `name: str?` | Show or switch the agent backend |
 | `/approvals` | `mode: str?` | Set approval and sandbox policy (safe/yolo) |
 | `/health` | - | Run health diagnostics |

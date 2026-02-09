@@ -59,8 +59,7 @@ discord_bot:
 | `/bind <path>` | Bind channel to a workspace |
 | `/repos` | List available repositories |
 | `/status` | Show current configuration |
-| `/model [name]` | Show or change the model |
-| `/effort [level]` | Show or change the reasoning effort (thinking level) |
+| `/model [name] [effort]` | Show or change the model (and optionally the reasoning effort / thinking level) |
 | `/agent [name]` | Show or change the agent |
 | `/approvals [mode]` | Set approval mode (safe/yolo) |
 | `/health` | Run health diagnostics |

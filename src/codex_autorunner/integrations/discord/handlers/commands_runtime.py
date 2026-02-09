@@ -122,11 +122,16 @@ class DiscordCommandHandlers:
             await self._handle_slash_resume(interaction, thread_id)
 
         @tree.command(name="model", description="Show or change the model")
-        @app_commands.describe(name="Model name to switch to (optional)")
+        @app_commands.describe(
+            name="Model name to switch to (optional)",
+            effort="Reasoning effort level (optional)",
+        )
         async def cmd_model(
-            interaction: discord.Interaction, name: Optional[str] = None
+            interaction: discord.Interaction,
+            name: Optional[str] = None,
+            effort: Optional[str] = None,
         ) -> None:
-            await self._handle_slash_model(interaction, name)
+            await self._handle_slash_model(interaction, name, effort=effort)
 
         @cmd_model.autocomplete("name")
         async def model_autocomplete(
@@ -134,15 +139,8 @@ class DiscordCommandHandlers:
         ) -> list[app_commands.Choice[str]]:
             return await self._autocomplete_model(interaction, current)
 
-        @tree.command(name="effort", description="Show or change reasoning effort")
-        @app_commands.describe(level="Reasoning effort level (optional)")
-        async def cmd_effort(
-            interaction: discord.Interaction, level: Optional[str] = None
-        ) -> None:
-            await self._handle_slash_effort(interaction, level)
-
-        @cmd_effort.autocomplete("level")
-        async def effort_autocomplete(
+        @cmd_model.autocomplete("effort")
+        async def model_effort_autocomplete(
             interaction: discord.Interaction, current: str
         ) -> list[app_commands.Choice[str]]:
             return _build_effort_choices(current, include_default=True)
@@ -593,48 +591,12 @@ class DiscordCommandHandlers:
 
         return choices[:25]
 
-    async def _handle_slash_model(self, interaction: Any, name: Optional[str]) -> None:
-        await interaction.response.defer(ephemeral=True)
-
-        guild_id = interaction.guild_id
-        channel = interaction.channel
-        if isinstance(channel, discord.Thread):
-            channel_id = channel.parent_id
-            thread_id = channel.id
-        else:
-            channel_id = channel.id
-            thread_id = None
-
-        from ..helpers import build_topic_key
-
-        topic_key = build_topic_key(guild_id, channel_id, thread_id)
-
-        if name:
-            from ..constants import DEFAULT_AGENT, DEFAULT_AGENT_MODELS
-
-            def apply(record: Any) -> None:
-                record.model = name
-                record.updated_at = now_iso()
-
-            await self._store.update_topic_field(topic_key, apply)
-            await interaction.followup.send(
-                f"Model set to `{name}`. Will apply on the next turn.", ephemeral=True
-            )
-        else:
-            record = await self._store.get_topic(topic_key)
-            current_model = record.model if record else None
-            if not current_model:
-                from ..constants import DEFAULT_AGENT, DEFAULT_AGENT_MODELS
-
-                agent = (record.agent if record else None) or DEFAULT_AGENT
-                current_model = DEFAULT_AGENT_MODELS.get(agent, "default")
-            await interaction.followup.send(
-                f"Current model: `{current_model}`. Use `/model <name>` to change.",
-                ephemeral=True,
-            )
-
-    async def _handle_slash_effort(
-        self, interaction: Any, level: Optional[str]
+    async def _handle_slash_model(
+        self,
+        interaction: Any,
+        name: Optional[str],
+        *,
+        effort: Optional[str] = None,
     ) -> None:
         await interaction.response.defer(ephemeral=True)
 
@@ -651,49 +613,64 @@ class DiscordCommandHandlers:
 
         topic_key = build_topic_key(guild_id, channel_id, thread_id)
 
-        normalized = level.strip().lower() if isinstance(level, str) else ""
-        if normalized:
-            from ..constants import VALID_REASONING_EFFORTS
+        has_name = isinstance(name, str) and name.strip()
+        has_effort = effort is not None and str(effort).strip() != ""
 
-            if normalized in {"default", "clear"}:
+        if has_name or has_effort:
+            desired_effort: Optional[str] = None
+            clear_effort = False
+            if has_effort:
+                normalized = str(effort).strip().lower()
+                if normalized in {"default", "clear"}:
+                    clear_effort = True
+                else:
+                    from ..constants import VALID_REASONING_EFFORTS
 
-                def apply_clear(record: Any) -> None:
-                    record.reasoning_effort = None
-                    record.updated_at = now_iso()
-
-                await self._store.update_topic_field(topic_key, apply_clear)
-                await interaction.followup.send(
-                    "Effort reset to `default`. Will apply on the next turn.",
-                    ephemeral=True,
-                )
-                return
-
-            if normalized not in VALID_REASONING_EFFORTS:
-                await interaction.followup.send(
-                    "Unknown effort "
-                    f"`{level}`. Allowed: {', '.join(sorted(VALID_REASONING_EFFORTS))} "
-                    "(or `default` to clear).",
-                    ephemeral=True,
-                )
-                return
+                    if normalized not in VALID_REASONING_EFFORTS:
+                        await interaction.followup.send(
+                            "Unknown effort "
+                            f"`{effort}`. Allowed: {', '.join(sorted(VALID_REASONING_EFFORTS))} "
+                            "(or `default` to clear).",
+                            ephemeral=True,
+                        )
+                        return
+                    desired_effort = normalized
 
             def apply(record: Any) -> None:
-                record.reasoning_effort = normalized
+                if has_name:
+                    record.model = str(name).strip()
+                if has_effort:
+                    record.reasoning_effort = None if clear_effort else desired_effort
                 record.updated_at = now_iso()
 
             await self._store.update_topic_field(topic_key, apply)
+            parts: list[str] = []
+            if has_name:
+                parts.append(f"model `{str(name).strip()}`")
+            if has_effort:
+                parts.append(
+                    f"effort `{desired_effort}`" if not clear_effort else "effort `default`"
+                )
+            what = ", ".join(parts) if parts else "settings"
             await interaction.followup.send(
-                f"Effort set to `{normalized}`. Will apply on the next turn.",
+                f"Set {what}. Will apply on the next turn.",
                 ephemeral=True,
             )
             return
 
         record = await self._store.get_topic(topic_key)
-        current = getattr(record, "reasoning_effort", None) if record else None
-        label = current or "default"
+        current_model = record.model if record else None
+        if not current_model:
+            from ..constants import DEFAULT_AGENT, DEFAULT_AGENT_MODELS
+
+            agent = (record.agent if record else None) or DEFAULT_AGENT
+            current_model = DEFAULT_AGENT_MODELS.get(agent, "default")
+        current_effort = getattr(record, "reasoning_effort", None) if record else None
+        effort_label = current_effort or "default"
         await interaction.followup.send(
-            f"Current effort: `{label}`. Use `/effort <level>` to change "
-            "(or `default` to clear).",
+            f"Current model: `{current_model}` (effort `{effort_label}`). "
+            "Use `/model name:<id> effort:<level>` to change "
+            "(set effort to `default` to clear).",
             ephemeral=True,
         )
 
