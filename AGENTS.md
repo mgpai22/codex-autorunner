@@ -36,6 +36,7 @@ This repo dogfoods codex-autorunner to build itself. Read this before running th
 - sessions/stop-session
 - serve (API/UI)
 - hub: `car hub serve|scan|create` (worktrees via UI/API)
+- discord: `car discord start|health|state-check` (Discord gateway bot)
 
 ## Docs
 
@@ -74,6 +75,7 @@ Reference docs in `docs/` (e.g., configuration, operations, debugging).
 
 ## Debugging
 - Telegram troubleshooting guide: `docs/ops/telegram-debugging.md`
+- Discord troubleshooting guide: `docs/ops/discord-bot-runbook.md`
 
 ## Subagent Model Configuration
 - See `docs/adding-an-agent.md` for the review/subagent model setup and YAML example.
