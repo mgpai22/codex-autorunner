@@ -86,6 +86,7 @@ class WorkspaceCommands:
             workspace=record.workspace_path if record else None,
             agent=record.agent if record else None,
             model=record.model if record else None,
+            effort=getattr(record, "reasoning_effort", None) if record else None,
             approval_mode=record.approval_mode if record else None,
             thread_id=record.codex_thread_id if record else None,
             guild_name=interaction.guild.name if interaction.guild else None,

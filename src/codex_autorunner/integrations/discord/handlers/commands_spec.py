@@ -36,6 +36,9 @@ def build_slash_command_specs() -> dict[str, SlashCommandSpec]:
         "new": SlashCommandSpec("new", "Start a new conversation"),
         "resume": SlashCommandSpec("resume", "Resume a previous conversation"),
         "model": SlashCommandSpec("model", "Show or change the model"),
+        "effort": SlashCommandSpec(
+            "effort", "Show or change reasoning effort", allow_during_turn=True
+        ),
         "agent": SlashCommandSpec("agent", "Show or change the agent"),
         "approvals": SlashCommandSpec("approvals", "Set approval and sandbox policy"),
         "review": SlashCommandSpec("review", "Run a code review"),

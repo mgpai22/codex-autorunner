@@ -34,6 +34,17 @@ class DiscordCommandHandlers:
         tree = self._bot.tree
         specs = build_slash_command_specs()
 
+        def _build_effort_choices(
+            current: str, *, include_default: bool = False
+        ) -> list[app_commands.Choice[str]]:
+            efforts = ["medium", "high", "xhigh", "low", "minimal", "none"]
+            if include_default:
+                efforts = ["default"] + efforts
+            filtered = (
+                [e for e in efforts if current.lower() in e] if current else efforts
+            )
+            return [app_commands.Choice(name=e, value=e) for e in filtered[:25]]
+
         @tree.command(
             name="setup",
             description="Scaffold swarm control surface channels",
@@ -78,9 +89,7 @@ class DiscordCommandHandlers:
         async def run_effort_autocomplete(
             interaction: discord.Interaction, current: str
         ) -> list[app_commands.Choice[str]]:
-            efforts = ["medium", "high", "xhigh", "low", "minimal", "none"]
-            filtered = [e for e in efforts if current.lower() in e] if current else efforts
-            return [app_commands.Choice(name=e, value=e) for e in filtered[:25]]
+            return _build_effort_choices(current)
 
         @tree.command(name="stop", description="Stop the active task")
         async def cmd_stop(interaction: discord.Interaction) -> None:
@@ -124,6 +133,19 @@ class DiscordCommandHandlers:
             interaction: discord.Interaction, current: str
         ) -> list[app_commands.Choice[str]]:
             return await self._autocomplete_model(interaction, current)
+
+        @tree.command(name="effort", description="Show or change reasoning effort")
+        @app_commands.describe(level="Reasoning effort level (optional)")
+        async def cmd_effort(
+            interaction: discord.Interaction, level: Optional[str] = None
+        ) -> None:
+            await self._handle_slash_effort(interaction, level)
+
+        @cmd_effort.autocomplete("level")
+        async def effort_autocomplete(
+            interaction: discord.Interaction, current: str
+        ) -> list[app_commands.Choice[str]]:
+            return _build_effort_choices(current, include_default=True)
 
         @tree.command(name="agent", description="Show or change the agent")
         @app_commands.describe(name="Agent name to switch to (optional)")
@@ -410,6 +432,7 @@ class DiscordCommandHandlers:
             workspace=record.workspace_path if record else None,
             agent=record.agent if record else None,
             model=record.model if record else None,
+            effort=getattr(record, "reasoning_effort", None) if record else None,
             approval_mode=record.approval_mode if record else None,
             thread_id=record.codex_thread_id if record else None,
         )
@@ -609,6 +632,70 @@ class DiscordCommandHandlers:
                 f"Current model: `{current_model}`. Use `/model <name>` to change.",
                 ephemeral=True,
             )
+
+    async def _handle_slash_effort(
+        self, interaction: Any, level: Optional[str]
+    ) -> None:
+        await interaction.response.defer(ephemeral=True)
+
+        guild_id = interaction.guild_id
+        channel = interaction.channel
+        if isinstance(channel, discord.Thread):
+            channel_id = channel.parent_id
+            thread_id = channel.id
+        else:
+            channel_id = channel.id
+            thread_id = None
+
+        from ..helpers import build_topic_key
+
+        topic_key = build_topic_key(guild_id, channel_id, thread_id)
+
+        normalized = level.strip().lower() if isinstance(level, str) else ""
+        if normalized:
+            from ..constants import VALID_REASONING_EFFORTS
+
+            if normalized in {"default", "clear"}:
+
+                def apply_clear(record: Any) -> None:
+                    record.reasoning_effort = None
+                    record.updated_at = now_iso()
+
+                await self._store.update_topic_field(topic_key, apply_clear)
+                await interaction.followup.send(
+                    "Effort reset to `default`. Will apply on the next turn.",
+                    ephemeral=True,
+                )
+                return
+
+            if normalized not in VALID_REASONING_EFFORTS:
+                await interaction.followup.send(
+                    "Unknown effort "
+                    f"`{level}`. Allowed: {', '.join(sorted(VALID_REASONING_EFFORTS))} "
+                    "(or `default` to clear).",
+                    ephemeral=True,
+                )
+                return
+
+            def apply(record: Any) -> None:
+                record.reasoning_effort = normalized
+                record.updated_at = now_iso()
+
+            await self._store.update_topic_field(topic_key, apply)
+            await interaction.followup.send(
+                f"Effort set to `{normalized}`. Will apply on the next turn.",
+                ephemeral=True,
+            )
+            return
+
+        record = await self._store.get_topic(topic_key)
+        current = getattr(record, "reasoning_effort", None) if record else None
+        label = current or "default"
+        await interaction.followup.send(
+            f"Current effort: `{label}`. Use `/effort <level>` to change "
+            "(or `default` to clear).",
+            ephemeral=True,
+        )
 
     async def _handle_slash_agent(self, interaction: Any, name: Optional[str]) -> None:
         await interaction.response.defer(ephemeral=True)

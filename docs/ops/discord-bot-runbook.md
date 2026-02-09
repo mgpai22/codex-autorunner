@@ -60,6 +60,7 @@ discord_bot:
 | `/repos` | List available repositories |
 | `/status` | Show current configuration |
 | `/model [name]` | Show or change the model |
+| `/effort [level]` | Show or change the reasoning effort (thinking level) |
 | `/agent [name]` | Show or change the agent |
 | `/approvals [mode]` | Set approval mode (safe/yolo) |
 | `/health` | Run health diagnostics |

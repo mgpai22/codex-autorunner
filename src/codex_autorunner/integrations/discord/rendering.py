@@ -36,6 +36,7 @@ def build_status_embed(
     workspace: Optional[str] = None,
     agent: Optional[str] = None,
     model: Optional[str] = None,
+    effort: Optional[str] = None,
     approval_mode: Optional[str] = None,
     thread_id: Optional[str] = None,
     guild_name: Optional[str] = None,
@@ -49,6 +50,7 @@ def build_status_embed(
     )
     embed.add_field(name="Agent", value=agent or "_default_", inline=True)
     embed.add_field(name="Model", value=model or "_default_", inline=True)
+    embed.add_field(name="Effort", value=effort or "_default_", inline=True)
     embed.add_field(name="Approval Mode", value=approval_mode or "_default_", inline=True)
     if thread_id:
         embed.add_field(name="Thread", value=_truncate(thread_id, 50), inline=True)
